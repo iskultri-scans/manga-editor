@@ -68,12 +68,7 @@
             </div>
             <!-- Text options -->
             <div class="opt-group" id="opt-text" data-tools="text">
-                <label class="opt-label">Size</label>
-                <input type="range" id="text-size" min="8" max="120" value="28">
-                <span class="opt-val" id="text-size-val">28</span>
-                <input type="color" id="text-color" value="#000000" class="color-pick">
-                <button class="toggle-btn" id="text-bold-btn">B</button>
-                <button class="toggle-btn" id="text-italic-btn"><em>I</em></button>
+                <button class="action-btn" id="add-text-btn">+ Add Text</button>
             </div>
             <!-- Eyedropper options -->
             <div class="opt-group" id="opt-eyedropper" data-tools="eyedropper">
@@ -242,6 +237,8 @@
             <canvas id="main-canvas"></canvas>
             <!-- Overlay canvas for selection rectangles, crop guides, etc. -->
             <canvas id="overlay-canvas"></canvas>
+            <!-- Text canvas (no CSS transform, renders at screen coords) -->
+            <canvas id="text-canvas"></canvas>
             <div class="placeholder" id="placeholder">
                 <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" opacity="0.3"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
                 <p>Load an image to start editing</p>
@@ -249,6 +246,38 @@
             </div>
             <div class="drop-zone hidden" id="drop-zone">Drop image here</div>
         </main>
+
+        <!-- TEXT OBJECT TOOLBAR (shown when a text object is selected) -->
+        <div class="text-toolbar hidden" id="text-toolbar">
+            <div class="tt-group">
+                <label class="tt-label">Size</label>
+                <button class="tt-btn" id="tt-size-down">−</button>
+                <span class="tt-val" id="tt-size-val">24</span>
+                <button class="tt-btn" id="tt-size-up">+</button>
+            </div>
+            <div class="tt-group">
+                <input type="color" id="tt-color" value="#000000" class="tt-color-pick">
+            </div>
+            <div class="tt-group">
+                <button class="tt-toggle" id="tt-bold">B</button>
+                <button class="tt-toggle" id="tt-italic"><em>I</em></button>
+            </div>
+            <div class="tt-group">
+                <button class="tt-align active" id="tt-align-left" data-align="left">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="18" y2="18"/></svg>
+                </button>
+                <button class="tt-align" id="tt-align-center" data-align="center">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="6" y1="12" x2="18" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+                </button>
+                <button class="tt-align" id="tt-align-right" data-align="right">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="9" y1="12" x2="21" y2="12"/><line x1="6" y1="18" x2="21" y2="18"/></svg>
+                </button>
+            </div>
+            <div class="tt-group">
+                <label class="tt-label">Space</label>
+                <input type="range" id="tt-line-height" min="10" max="30" value="14" class="tt-range">
+            </div>
+        </div>
 
         <!-- BOTTOM TOOLBAR -->
         <nav class="bottom-bar" id="bottom-bar">

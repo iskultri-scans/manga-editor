@@ -7,6 +7,8 @@
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     const overlay = $('overlay-canvas');
     const octx = overlay.getContext('2d');
+    const textCanvas = $('text-canvas');
+    const tctx = textCanvas.getContext('2d');
     const area = $('canvas-area');
     const fileInput = $('file-input');
     const dropZone = $('drop-zone');
@@ -59,6 +61,9 @@
     const lpDelBtn = $('lp-del-btn');
     const lpMergeBtn = $('lp-merge-btn');
 
+    // Text toolbar
+    const textToolbar = $('text-toolbar');
+
     // ========== STATE ==========
     let img = null;
     let fileName = 'image';
@@ -104,23 +109,19 @@
     let drawing = false;
     let lastPt = null;
 
-    // Text
-    let textSize = 20;
-    let textColor = '#000000';
-    let textBold = false;
-    let textItalic = false;
-    let textEditing = false;
+    // Text — new architecture
     let textObjects = [];
-    let selectedTextObj = null;
-    let textDragObj = null;
-    let textDragPending = null;
-    let textDragPendingOff = null;
-    let textDragPendingStart = null;
-    let textDragOff = null;
-    let textResizeObj = null;
+    let selectedText = null;
+    let textDragActive = false;
+    let textDragStart = null;
+    let textRotating = false;
+    let textRotateStart = null;
+    let textResizing = false;
+    let textResizeCorner = null;
     let textResizeStart = null;
+    let textModalOpen = false;
     let lastTapTime = 0;
-    let lastTapObj = null;
+    let lastTapTarget = null;
 
     // Fill
     let fillColor = '#ffffff';
@@ -176,7 +177,6 @@
 
     function deleteLayer(id) {
         if (layers.length <= 1) {
-            // Clear instead of delete
             const layer = layers[0];
             layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
             layer.undoStack = [];
@@ -215,10 +215,9 @@
 
     function mergeDown(id) {
         const idx = layers.findIndex(l => l.id === id);
-        if (idx <= 0) return; // can't merge bottom layer down
+        if (idx <= 0) return;
         const top = layers[idx];
         const bot = layers[idx - 1];
-        // Composite top onto bottom
         bot.ctx.save();
         bot.ctx.globalAlpha = top.opacity / 100;
         bot.ctx.globalCompositeOperation = top.blendMode;
@@ -240,7 +239,7 @@
     }
 
     function setActiveLayer(id) {
-        if (textEditing) commitText();
+        if (textModalOpen) commitTextModal();
         activeLayerId = id;
         renderLayerPanel();
         updateUndoButtons();
@@ -310,13 +309,11 @@
             image.onload = () => {
                 img = image;
 
-                // Create compositing buffer
                 off = document.createElement('canvas');
                 off.width = img.width;
                 off.height = img.height;
                 offCtx = off.getContext('2d', { willReadFrequently: true });
 
-                // Create first layer
                 const bg = createLayer('Background', img.width, img.height);
                 bg.ctx.drawImage(img, 0, 0);
                 layers = [bg];
@@ -360,6 +357,12 @@
         canvas.height = off.height;
         overlay.width = off.width;
         overlay.height = off.height;
+        resizeTextCanvas();
+    }
+
+    function resizeTextCanvas() {
+        textCanvas.width = area.clientWidth;
+        textCanvas.height = area.clientHeight;
     }
 
     function applyZoomView() {
@@ -379,12 +382,14 @@
         renderContent();
         renderOverlay();
         applyZoomView();
+        renderTextObjects();
     }
 
     function zoomRender() {
         isZooming = true;
         applyZoomView();
         overlay.style.display = 'none';
+        renderTextObjects(); // Keep text visible during zoom
         clearTimeout(zoomEndTimer);
         zoomEndTimer = setTimeout(onZoomEnd, 120);
     }
@@ -442,38 +447,6 @@
             }
             octx.restore();
         }
-
-        // Text objects
-        if (currentTool === 'text' && !textEditing) {
-            for (const obj of textObjects) {
-                if (!obj.text) continue;
-                octx.save();
-                octx.font = `${obj.italic ? 'italic ' : ''}${obj.bold ? 'bold ' : ''}${obj.fontSize}px 'Noto Sans Bengali', sans-serif`;
-                octx.fillStyle = obj.color || '#000000';
-                octx.textBaseline = 'top';
-                const lines = obj.text.split('\n');
-                lines.forEach((line, i) => {
-                    octx.fillText(line, obj.x, obj.y + obj.fontSize * 1.2 * i + obj.fontSize);
-                });
-                octx.restore();
-
-                if (obj === selectedTextObj) {
-                    octx.save();
-                    octx.strokeStyle = '#7c3aed';
-                    octx.lineWidth = 1.5 / zoom;
-                    octx.setLineDash([5 / zoom, 3 / zoom]);
-                    octx.strokeRect(obj.x - 2, obj.y - 2, obj._w + 4, obj._h + 4);
-                    octx.setLineDash([]);
-
-                    // Resize handle
-                    const isMob = 'ontouchstart' in window;
-                    const hSize = (isMob ? 12 : 5) / zoom;
-                    octx.fillStyle = '#7c3aed';
-                    octx.fillRect(obj.x + obj._w - hSize, obj.y + obj._h - hSize, hSize * 2, hSize * 2);
-                    octx.restore();
-                }
-            }
-        }
     }
 
     function corners(r) {
@@ -489,16 +462,548 @@
         };
     }
 
+    // Convert image coords to screen coords (relative to area element)
+    function imageToScreen(x, y) {
+        return { x: x * zoom + panX, y: y * zoom + panY };
+    }
+
+    // Convert screen coords (relative to area) to image coords
+    function screenPtToImg(sx, sy) {
+        return { x: (sx - panX) / zoom, y: (sy - panY) / zoom };
+    }
+
+    // Get screen point relative to area from a client event
+    function getAreaScreenPt(e) {
+        const rect = area.getBoundingClientRect();
+        return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    }
+
+    // ========== TEXT SYSTEM ==========
+    function createTextObject(x, y, value) {
+        return {
+            x, y,                    // image coordinates
+            text: value || '',
+            fontSize: 24,
+            fontFamily: "'Noto Sans Bengali', sans-serif",
+            color: '#000000',
+            align: 'left',
+            bold: false,
+            italic: false,
+            lineHeight: 1.4,
+            boxWidth: 200,           // in image pixels — controls word wrap
+            rotation: 0,             // degrees
+            _lines: [],              // computed wrapped lines
+            _h: 0                    // computed height in image pixels
+        };
+    }
+
+    function computeLines(obj) {
+        const tc = textCanvas.getContext('2d');
+        tc.font = `${obj.italic ? 'italic ' : ''}${obj.bold ? 'bold ' : ''}${obj.fontSize}px ${obj.fontFamily}`;
+        const words = obj.text.split(' ');
+        const lines = [];
+        let current = '';
+        for (const word of words) {
+            const test = current ? current + ' ' + word : word;
+            if (tc.measureText(test).width > obj.boxWidth) {
+                if (current) lines.push(current);
+                current = word;
+            } else {
+                current = test;
+            }
+        }
+        if (current) lines.push(current);
+        // Also split on \n
+        obj._lines = lines.flatMap(l => l.split('\n'));
+        obj._h = obj._lines.length * obj.fontSize * obj.lineHeight;
+    }
+
+    function hitTestTextScreen(obj, pt) {
+        const screen = imageToScreen(obj.x, obj.y);
+        const w = obj.boxWidth * zoom;
+        const h = obj._h * zoom;
+        // Approximate — ignore rotation for hit test
+        return pt.x >= screen.x && pt.x <= screen.x + w &&
+               pt.y >= screen.y && pt.y <= screen.y + h;
+    }
+
+    function hitTestCornerHandle(obj, pt) {
+        if (!obj || obj._lines.length === 0) return -1;
+        const screen = imageToScreen(obj.x, obj.y);
+        const w = obj.boxWidth * zoom;
+        const h = obj._h * zoom;
+        const r = 14; // hit radius (mobile-friendly)
+        const corners = [
+            { x: screen.x, y: screen.y },
+            { x: screen.x + w, y: screen.y },
+            { x: screen.x, y: screen.y + h },
+            { x: screen.x + w, y: screen.y + h }
+        ];
+        for (let i = 0; i < corners.length; i++) {
+            if (Math.hypot(pt.x - corners[i].x, pt.y - corners[i].y) < r) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    function hitTestRotationHandle(obj, pt) {
+        if (!obj || obj._lines.length === 0) return false;
+        const screen = imageToScreen(obj.x, obj.y);
+        const w = obj.boxWidth * zoom;
+        const h = obj._h * zoom;
+        const handleX = screen.x + w / 2;
+        const handleY = screen.y + h + 32;
+        return Math.hypot(pt.x - handleX, pt.y - handleY) < 18;
+    }
+
+    // ========== TEXT POINTER EVENTS (screen coordinates) ==========
+    function textPointerDown(pt) {
+        if (textModalOpen) return;
+
+        // Check handles on selected text first
+        if (selectedText) {
+            // Rotation handle
+            if (hitTestRotationHandle(selectedText, pt)) {
+                textRotating = true;
+                const screen = imageToScreen(selectedText.x, selectedText.y);
+                const cx = screen.x + (selectedText.boxWidth * zoom) / 2;
+                const cy = screen.y + (selectedText._h * zoom) / 2;
+                textRotateStart = {
+                    startAngle: Math.atan2(pt.y - cy, pt.x - cx),
+                    startRotation: selectedText.rotation
+                };
+                hideTextToolbar();
+                return;
+            }
+
+            // Corner handles
+            const corner = hitTestCornerHandle(selectedText, pt);
+            if (corner >= 0) {
+                textResizing = true;
+                textResizeCorner = corner;
+                textResizeStart = {
+                    px: pt.x,
+                    py: pt.y,
+                    boxWidth: selectedText.boxWidth,
+                    fontSize: selectedText.fontSize
+                };
+                hideTextToolbar();
+                return;
+            }
+        }
+
+        // Check double-tap on existing text objects
+        const now = Date.now();
+        for (let i = textObjects.length - 1; i >= 0; i--) {
+            if (hitTestTextScreen(textObjects[i], pt)) {
+                // Double-tap detection
+                if (lastTapTarget === textObjects[i] && now - lastTapTime < 300) {
+                    openTextModal(textObjects[i]);
+                    lastTapTime = 0;
+                    lastTapTarget = null;
+                    return;
+                }
+                lastTapTime = now;
+                lastTapTarget = textObjects[i];
+
+                // Select and start drag
+                selectedText = textObjects[i];
+                textDragActive = true;
+                textDragStart = { px: pt.x, py: pt.y, ox: textObjects[i].x, oy: textObjects[i].y };
+                hideTextToolbar();
+                renderTextObjects();
+                return;
+            }
+        }
+
+        // Tapped on empty space — deselect
+        lastTapTime = 0;
+        lastTapTarget = null;
+        selectedText = null;
+        textDragActive = false;
+        hideTextToolbar();
+        renderTextObjects();
+    }
+
+    function textPointerMove(pt) {
+        if (textDragActive && selectedText) {
+            const dx = (pt.x - textDragStart.px) / zoom;
+            const dy = (pt.y - textDragStart.py) / zoom;
+            selectedText.x = textDragStart.ox + dx;
+            selectedText.y = textDragStart.oy + dy;
+            textCanvas.style.cursor = 'move';
+            renderTextObjects();
+            return;
+        }
+
+        if (textRotating && selectedText) {
+            const screen = imageToScreen(selectedText.x, selectedText.y);
+            const cx = screen.x + (selectedText.boxWidth * zoom) / 2;
+            const cy = screen.y + (selectedText._h * zoom) / 2;
+            const angle = Math.atan2(pt.y - cy, pt.x - cx);
+            selectedText.rotation = textRotateStart.startRotation +
+                (angle - textRotateStart.startAngle) * (180 / Math.PI);
+            textCanvas.style.cursor = 'grab';
+            renderTextObjects();
+            return;
+        }
+
+        if (textResizing && selectedText) {
+            const dx = (pt.x - textResizeStart.px) / zoom;
+            selectedText.boxWidth = Math.max(60, textResizeStart.boxWidth + dx);
+            computeLines(selectedText);
+            textCanvas.style.cursor = 'ew-resize';
+            renderTextObjects();
+            return;
+        }
+
+        // Hover cursor update
+        if (selectedText) {
+            if (hitTestRotationHandle(selectedText, pt)) {
+                textCanvas.style.cursor = 'grab';
+                return;
+            }
+            if (hitTestCornerHandle(selectedText, pt) >= 0) {
+                textCanvas.style.cursor = 'ew-resize';
+                return;
+            }
+        }
+        for (let i = textObjects.length - 1; i >= 0; i--) {
+            if (hitTestTextScreen(textObjects[i], pt)) {
+                textCanvas.style.cursor = 'move';
+                return;
+            }
+        }
+        textCanvas.style.cursor = 'default';
+    }
+
+    function textPointerUp() {
+        const wasDragging = textDragActive || textRotating || textResizing;
+        textDragActive = false;
+        textRotating = false;
+        textResizing = false;
+        textDragStart = null;
+        textRotateStart = null;
+        textResizeStart = null;
+        if (selectedText && wasDragging) {
+            showTextToolbar();
+        }
+        renderTextObjects();
+    }
+
+    // ========== TEXT MODAL ==========
+    function openTextModal(obj) {
+        if (textModalOpen) return;
+        textModalOpen = true;
+        selectedText = obj;
+        const savedText = obj.text;
+
+        // Create dim overlay
+        const modalOverlay = document.createElement('div');
+        modalOverlay.className = 'text-modal-overlay';
+
+        // Create modal
+        const modal = document.createElement('div');
+        modal.className = 'text-modal';
+
+        const textarea = document.createElement('textarea');
+        textarea.value = obj.text;
+        textarea.setAttribute('dir', 'auto');
+        textarea.setAttribute('placeholder', 'Enter text...');
+
+        const btns = document.createElement('div');
+        btns.className = 'text-modal-btns';
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'text-modal-cancel';
+        cancelBtn.textContent = 'Cancel';
+
+        const doneBtn = document.createElement('button');
+        doneBtn.className = 'text-modal-done';
+        doneBtn.textContent = 'Done';
+
+        btns.appendChild(cancelBtn);
+        btns.appendChild(doneBtn);
+        modal.appendChild(textarea);
+        modal.appendChild(btns);
+        modalOverlay.appendChild(modal);
+        document.body.appendChild(modalOverlay);
+
+        // Focus textarea
+        requestAnimationFrame(() => textarea.focus());
+        if ('ontouchstart' in window) {
+            setTimeout(() => textarea.scrollIntoView({ behavior: 'smooth', block: 'center' }), 150);
+        }
+
+        // Done handler
+        function doDone() {
+            obj.text = textarea.value;
+            if (!obj.text.trim()) {
+                // Remove empty text objects
+                textObjects = textObjects.filter(o => o !== obj);
+                if (selectedText === obj) selectedText = null;
+            } else {
+                computeLines(obj);
+            }
+            closeModal();
+            showTextToolbar();
+            renderTextObjects();
+        }
+
+        // Cancel handler
+        function doCancel() {
+            if (savedText === '' && !obj.text) {
+                // New object with no text — remove it
+                textObjects = textObjects.filter(o => o !== obj);
+                if (selectedText === obj) selectedText = null;
+            } else {
+                obj.text = savedText;
+                computeLines(obj);
+            }
+            closeModal();
+            if (selectedText) showTextToolbar();
+            renderTextObjects();
+        }
+
+        function closeModal() {
+            textModalOpen = false;
+            modalOverlay.remove();
+        }
+
+        doneBtn.addEventListener('click', doDone);
+        cancelBtn.addEventListener('click', doCancel);
+
+        textarea.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doDone(); }
+            if (e.key === 'Escape') { e.preventDefault(); doCancel(); }
+        });
+
+        // Prevent modal clicks from reaching canvas
+        modalOverlay.addEventListener('pointerdown', e => e.stopPropagation());
+        modalOverlay.addEventListener('touchstart', e => e.stopPropagation());
+    }
+
+    function commitTextModal() {
+        // If modal is open, close it (text is already saved in the object)
+        const modalOverlay = document.querySelector('.text-modal-overlay');
+        if (modalOverlay) {
+            textModalOpen = false;
+            modalOverlay.remove();
+        }
+    }
+
+    // ========== TEXT RENDERING ==========
+    function renderTextObjects() {
+        tctx.clearRect(0, 0, textCanvas.width, textCanvas.height);
+
+        if (currentTool !== 'text') return;
+
+        for (const obj of textObjects) {
+            if (!obj.text) continue;
+            computeLines(obj);
+            const screen = imageToScreen(obj.x, obj.y);
+
+            tctx.save();
+            tctx.translate(screen.x, screen.y);
+            tctx.rotate((obj.rotation * Math.PI) / 180);
+
+            // Draw text
+            tctx.font = `${obj.italic ? 'italic ' : ''}${obj.bold ? 'bold ' : ''}${obj.fontSize * zoom}px ${obj.fontFamily}`;
+            tctx.fillStyle = obj.color;
+            tctx.textAlign = obj.align;
+            tctx.textBaseline = 'top';
+            const startX = obj.align === 'center' ? (obj.boxWidth * zoom) / 2 :
+                           obj.align === 'right' ? obj.boxWidth * zoom : 0;
+            obj._lines.forEach((line, i) => {
+                tctx.fillText(line, startX, i * obj.fontSize * obj.lineHeight * zoom);
+            });
+
+            // Draw selection box and handles only when selected and not dragging
+            if (obj === selectedText && !textDragActive && !textRotating && !textResizing) {
+                const w = obj.boxWidth * zoom;
+                const h = obj._h * zoom;
+                const r = 6; // handle radius
+
+                tctx.strokeStyle = '#4f9eff';
+                tctx.lineWidth = 1.5;
+                tctx.setLineDash([5, 3]);
+                tctx.strokeRect(0, 0, w, h);
+                tctx.setLineDash([]);
+
+                // Corner handles
+                const corners = [[0,0],[w,0],[0,h],[w,h]];
+                for (const [cx, cy] of corners) {
+                    tctx.beginPath();
+                    tctx.arc(cx, cy, r, 0, Math.PI * 2);
+                    tctx.fillStyle = '#ffffff';
+                    tctx.fill();
+                    tctx.strokeStyle = '#4f9eff';
+                    tctx.lineWidth = 2;
+                    tctx.stroke();
+                }
+
+                // Rotation handle — below bottom center
+                tctx.beginPath();
+                tctx.moveTo(w / 2, h);
+                tctx.lineTo(w / 2, h + 24);
+                tctx.strokeStyle = '#4f9eff';
+                tctx.lineWidth = 1.5;
+                tctx.stroke();
+                tctx.beginPath();
+                tctx.arc(w / 2, h + 32, 8, 0, Math.PI * 2);
+                tctx.fillStyle = '#4f9eff';
+                tctx.fill();
+            }
+
+            tctx.restore();
+        }
+    }
+
+    // ========== TEXT TOOLBAR ==========
+    function showTextToolbar() {
+        if (!selectedText || textModalOpen) return;
+        textToolbar.classList.remove('hidden');
+        updateTextToolbarValues();
+    }
+
+    function hideTextToolbar() {
+        textToolbar.classList.add('hidden');
+    }
+
+    function updateTextToolbarValues() {
+        if (!selectedText) return;
+        $('tt-size-val').textContent = selectedText.fontSize;
+        $('tt-color').value = selectedText.color;
+        $('tt-bold').classList.toggle('on', selectedText.bold);
+        $('tt-italic').classList.toggle('on', selectedText.italic);
+        $('tt-line-height').value = Math.round(selectedText.lineHeight * 10);
+        // Update alignment buttons
+        document.querySelectorAll('.tt-align').forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.align === selectedText.align);
+        });
+    }
+
+    function setupTextToolbar() {
+        // Font size +/-
+        $('tt-size-down').addEventListener('click', () => {
+            if (!selectedText) return;
+            selectedText.fontSize = Math.max(6, selectedText.fontSize - 2);
+            computeLines(selectedText);
+            updateTextToolbarValues();
+            renderTextObjects();
+        });
+        $('tt-size-up').addEventListener('click', () => {
+            if (!selectedText) return;
+            selectedText.fontSize = Math.min(200, selectedText.fontSize + 2);
+            computeLines(selectedText);
+            updateTextToolbarValues();
+            renderTextObjects();
+        });
+
+        // Color
+        $('tt-color').addEventListener('input', e => {
+            if (!selectedText) return;
+            selectedText.color = e.target.value;
+            renderTextObjects();
+        });
+
+        // Bold
+        $('tt-bold').addEventListener('click', () => {
+            if (!selectedText) return;
+            selectedText.bold = !selectedText.bold;
+            computeLines(selectedText);
+            updateTextToolbarValues();
+            renderTextObjects();
+        });
+
+        // Italic
+        $('tt-italic').addEventListener('click', () => {
+            if (!selectedText) return;
+            selectedText.italic = !selectedText.italic;
+            computeLines(selectedText);
+            updateTextToolbarValues();
+            renderTextObjects();
+        });
+
+        // Alignment
+        document.querySelectorAll('.tt-align').forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (!selectedText) return;
+                selectedText.align = btn.dataset.align;
+                updateTextToolbarValues();
+                renderTextObjects();
+            });
+        });
+
+        // Line height
+        $('tt-line-height').addEventListener('input', e => {
+            if (!selectedText) return;
+            selectedText.lineHeight = +e.target.value / 10;
+            computeLines(selectedText);
+            renderTextObjects();
+        });
+
+        // Add Text button
+        $('add-text-btn').addEventListener('click', () => {
+            if (!img) return;
+            // Create new text at center of visible area
+            const cx = (area.clientWidth / 2 - panX) / zoom;
+            const cy = (area.clientHeight / 2 - panY) / zoom;
+            const obj = createTextObject(cx, cy);
+            textObjects.push(obj);
+            selectedText = obj;
+            openTextModal(obj);
+            renderTextObjects();
+        });
+    }
+
+    // ========== FLATTEN TEXT ==========
+    function flattenText() {
+        const layer = getActiveLayer();
+        if (!layer || textObjects.length === 0) return;
+        saveState();
+        for (const obj of textObjects) {
+            if (!obj.text) continue;
+            computeLines(obj);
+            layer.ctx.save();
+            layer.ctx.translate(obj.x, obj.y);
+            layer.ctx.rotate((obj.rotation * Math.PI) / 180);
+            layer.ctx.font = `${obj.italic ? 'italic ' : ''}${obj.bold ? 'bold ' : ''}${obj.fontSize}px ${obj.fontFamily}`;
+            layer.ctx.fillStyle = obj.color || '#000000';
+            layer.ctx.textAlign = obj.align;
+            layer.ctx.textBaseline = 'top';
+            const startX = obj.align === 'center' ? obj.boxWidth / 2 :
+                           obj.align === 'right' ? obj.boxWidth : 0;
+            obj._lines.forEach((line, i) => {
+                layer.ctx.fillText(line, startX, i * obj.fontSize * obj.lineHeight);
+            });
+            layer.ctx.restore();
+        }
+        textObjects = [];
+        selectedText = null;
+        hideTextToolbar();
+        tctx.clearRect(0, 0, textCanvas.width, textCanvas.height);
+        renderAll();
+        updateActiveThumbnail();
+    }
+
     // ========== POINTER EVENTS ==========
     function setupPointer() {
         overlay.addEventListener('pointerdown', onPointerDown);
         overlay.addEventListener('dblclick', onDblClick);
         window.addEventListener('pointermove', onPointerMove);
         window.addEventListener('pointerup', onPointerUp);
+
+        // Text canvas pointer events
+        textCanvas.addEventListener('pointerdown', onTextPointerDown);
+        window.addEventListener('pointermove', onTextPointerMove);
+        window.addEventListener('pointerup', onTextPointerUp);
     }
 
     function onPointerDown(e) {
         if (!img || e.pointerType === 'touch') return;
+        if (currentTool === 'text') return; // handled by text canvas
         e.preventDefault();
         overlay.setPointerCapture(e.pointerId);
         pointerDown = true;
@@ -508,26 +1013,53 @@
 
     function onPointerMove(e) {
         if (!img || e.pointerType === 'touch' || !pointerDown) return;
+        if (currentTool === 'text') return;
         const pt = screenToImg(e.clientX, e.clientY);
         toolMove(pt);
     }
 
     function onPointerUp(e) {
         if (e.pointerType === 'touch') return;
+        if (currentTool === 'text') return;
         pointerDown = false;
         toolUp();
     }
 
     function onDblClick(e) {
-        if (!img || currentTool !== 'text' || textEditing) return;
-        const pt = screenToImg(e.clientX, e.clientY);
+        if (!img || currentTool !== 'text' || textModalOpen) return;
+        const pt = getAreaScreenPt(e);
         for (let i = textObjects.length - 1; i >= 0; i--) {
-            if (hitTestText(textObjects[i], pt.x, pt.y)) {
-                selectedTextObj = textObjects[i];
-                startEditText(textObjects[i]);
+            if (hitTestTextScreen(textObjects[i], pt)) {
+                selectedText = textObjects[i];
+                openTextModal(textObjects[i]);
                 return;
             }
         }
+    }
+
+    // Text canvas pointer handlers
+    let textPointerDownActive = false;
+
+    function onTextPointerDown(e) {
+        if (!img || currentTool !== 'text' || e.pointerType === 'touch') return;
+        e.preventDefault();
+        e.stopPropagation();
+        textCanvas.setPointerCapture(e.pointerId);
+        textPointerDownActive = true;
+        const pt = getAreaScreenPt(e);
+        textPointerDown(pt);
+    }
+
+    function onTextPointerMove(e) {
+        if (!textPointerDownActive || currentTool !== 'text') return;
+        const pt = getAreaScreenPt(e);
+        textPointerMove(pt);
+    }
+
+    function onTextPointerUp(e) {
+        if (!textPointerDownActive) return;
+        textPointerDownActive = false;
+        textPointerUp();
     }
 
     // ========== TOUCH EVENTS ==========
@@ -543,19 +1075,11 @@
         e.preventDefault();
         touchCache = Array.from(e.touches);
         if (touchCache.length === 1) {
-            if (currentTool === 'text' && !textEditing) {
+            if (currentTool === 'text' && !textModalOpen) {
                 const t = touchCache[0];
-                const pt = screenToImg(t.clientX, t.clientY);
-                // Double-tap detection
-                let tappedObj = null;
-                for (let i = textObjects.length - 1; i >= 0; i--) {
-                    if (hitTestText(textObjects[i], pt.x, pt.y)) { tappedObj = textObjects[i]; break; }
-                }
-                if (tappedObj) {
-                    if (handleTextTouchStart(pt, tappedObj)) return;
-                }
-                // Normal touch down
-                textDown(pt);
+                const rect = area.getBoundingClientRect();
+                const screenPt = { x: t.clientX - rect.left, y: t.clientY - rect.top };
+                textPointerDown(screenPt);
                 touchStartPt = { cx: t.clientX, cy: t.clientY };
                 return;
             }
@@ -566,6 +1090,9 @@
             touchPending = false;
             drawing = false;
             selActive = false;
+            textDragActive = false;
+            textRotating = false;
+            textResizing = false;
             isPinching = true;
             lastPinchDist = pinchDist(touchCache);
             lastPinchCenter = pinchCenter(touchCache);
@@ -578,6 +1105,12 @@
         touchCache = Array.from(e.touches);
         if (touchCache.length === 1 && !isPinching) {
             const t = touchCache[0];
+            if (currentTool === 'text' && !textModalOpen) {
+                const rect = area.getBoundingClientRect();
+                const screenPt = { x: t.clientX - rect.left, y: t.clientY - rect.top };
+                textPointerMove(screenPt);
+                return;
+            }
             if (touchPending) {
                 const dx = t.clientX - touchStartPt.cx;
                 const dy = t.clientY - touchStartPt.cy;
@@ -609,6 +1142,10 @@
         touchCache = Array.from(e.touches);
         if (touchCache.length < 2) { isPinching = false; }
         if (touchCache.length === 0) {
+            if (currentTool === 'text' && !textModalOpen) {
+                textPointerUp();
+                return;
+            }
             if (touchPending) {
                 touchPending = false;
                 toolDown(screenToImg(touchStartPt.cx, touchStartPt.cy));
@@ -628,7 +1165,6 @@
             case 'select': selectDown(pt); break;
             case 'brush': brushDown(pt); break;
             case 'eraser': eraserDown(pt); break;
-            case 'text': textDown(pt); break;
             case 'eyedropper': eyedropperDown(pt); break;
             case 'fill': fillDown(pt); break;
             case 'crop': cropDown(pt); break;
@@ -640,7 +1176,6 @@
             case 'select': selectMove(pt); break;
             case 'brush': brushMove(pt); break;
             case 'eraser': eraserMove(pt); break;
-            case 'text': textMove(pt); break;
             case 'crop': cropMove(pt); break;
         }
     }
@@ -650,7 +1185,6 @@
             case 'select': selectUp(); break;
             case 'brush': brushUp(); break;
             case 'eraser': eraserUp(); break;
-            case 'text': textUp(); break;
             case 'crop': cropUp(); break;
         }
     }
@@ -734,261 +1268,6 @@
     function eraserUp() {
         drawing = false;
         lastPt = null;
-        updateActiveThumbnail();
-    }
-
-    // ========== TEXT OBJECTS ==========
-    function createTextObject(x, y) {
-        return {
-            x, y,
-            fontSize: textSize,
-            bold: textBold,
-            italic: textItalic,
-            color: textColor,
-            text: '',
-            _w: 0,
-            _h: 0,
-            _savedText: ''
-        };
-    }
-
-    function measureTextObject(obj) {
-        const tc = document.createElement('canvas').getContext('2d');
-        tc.font = `${obj.italic ? 'italic ' : ''}${obj.bold ? 'bold ' : ''}${obj.fontSize}px 'Noto Sans Bengali', sans-serif`;
-        const lines = obj.text.split('\n');
-        obj._w = Math.max(...lines.map(l => tc.measureText(l).width), 40);
-        obj._h = lines.length * obj.fontSize * 1.2;
-    }
-
-    function hitTestText(obj, x, y) {
-        return x >= obj.x && x <= obj.x + obj._w &&
-               y >= obj.y && y <= obj.y + obj._h;
-    }
-
-    function hitTestResizeHandle(obj, x, y) {
-        const isMob = 'ontouchstart' in window;
-        const hSize = (isMob ? 24 : 10) / zoom;
-        const hx = obj.x + obj._w;
-        const hy = obj.y + obj._h;
-        return Math.abs(x - hx) < hSize && Math.abs(y - hy) < hSize;
-    }
-
-    function handleTextTouchStart(pt, obj) {
-        const now = Date.now();
-        if (lastTapObj === obj && now - lastTapTime < 300) {
-            startEditText(obj);
-            lastTapTime = 0;
-            lastTapObj = null;
-            return true;
-        }
-        lastTapTime = now;
-        lastTapObj = obj;
-        return false;
-    }
-
-    // ========== TOOL 4: TEXT ==========
-    function textDown(pt) {
-        if (textEditing) { commitText(); return; }
-
-        // 1. Resize handle check FIRST
-        if (selectedTextObj && hitTestResizeHandle(selectedTextObj, pt.x, pt.y)) {
-            textResizeObj = selectedTextObj;
-            textResizeStart = {
-                x: pt.x, y: pt.y,
-                fontSize: selectedTextObj.fontSize,
-                w: selectedTextObj._w,
-                h: selectedTextObj._h
-            };
-            return;
-        }
-
-        // 2. Hit test existing objects (top to bottom z-order)
-        for (let i = textObjects.length - 1; i >= 0; i--) {
-            if (hitTestText(textObjects[i], pt.x, pt.y)) {
-                selectedTextObj = textObjects[i];
-                textDragPending = selectedTextObj;
-                textDragPendingOff = { x: pt.x - selectedTextObj.x, y: pt.y - selectedTextObj.y };
-                textDragPendingStart = { x: pt.x, y: pt.y };
-                renderOverlay();
-                return;
-            }
-        }
-
-        // 3. Click on empty space
-        if (selectedTextObj) {
-            selectedTextObj = null;
-            renderOverlay();
-            return;
-        }
-
-        // 4. Second click on empty = create new text object
-        const obj = createTextObject(pt.x, pt.y);
-        textObjects.push(obj);
-        selectedTextObj = obj;
-        startEditText(obj);
-        renderOverlay();
-    }
-
-    function textMove(pt) {
-        if (textDragPending && !textDragObj) {
-            const dx = pt.x - textDragPendingStart.x;
-            const dy = pt.y - textDragPendingStart.y;
-            if (Math.hypot(dx, dy) > (('ontouchstart' in window) ? 15 : 3) / zoom) {
-                textDragObj = textDragPending;
-                textDragOff = textDragPendingOff;
-            }
-        }
-
-        if (textDragObj) {
-            textDragObj.x = pt.x - textDragOff.x;
-            textDragObj.y = pt.y - textDragOff.y;
-            overlay.style.cursor = 'move';
-            renderOverlay();
-            return;
-        }
-
-        if (textResizeObj) {
-            const dx = pt.x - textResizeStart.x;
-            const dy = pt.y - textResizeStart.y;
-            const dist = Math.hypot(dx, dy);
-            const startDist = Math.hypot(textResizeStart.w, textResizeStart.h);
-            const scale = Math.max(0.2, (startDist + dist) / startDist);
-            textResizeObj.fontSize = Math.max(6, Math.round(textResizeStart.fontSize * scale));
-            overlay.style.cursor = 'nwse-resize';
-            measureTextObject(textResizeObj);
-            renderOverlay();
-            return;
-        }
-
-        // Hover cursor update
-        if (selectedTextObj && hitTestResizeHandle(selectedTextObj, pt.x, pt.y)) {
-            overlay.style.cursor = 'nwse-resize';
-            return;
-        }
-        for (let i = textObjects.length - 1; i >= 0; i--) {
-            if (hitTestText(textObjects[i], pt.x, pt.y)) {
-                overlay.style.cursor = 'move';
-                return;
-            }
-        }
-        overlay.style.cursor = 'text';
-    }
-
-    function textUp() {
-        textDragObj = null;
-        textDragOff = null;
-        textDragPending = null;
-        textDragPendingOff = null;
-        textDragPendingStart = null;
-        textResizeObj = null;
-        textResizeStart = null;
-        overlay.style.cursor = 'text';
-        renderOverlay();
-    }
-
-    function startEditText(obj) {
-        obj._savedText = obj.text;
-        textEditing = true;
-
-        const textarea = document.createElement('textarea');
-        textarea.className = 'canvas-text-input';
-        textarea.value = obj.text;
-        textarea.style.font = `${obj.italic ? 'italic ' : ''}${obj.bold ? 'bold ' : ''}${obj.fontSize}px 'Noto Sans Bengali', sans-serif`;
-        textarea.style.color = obj.color;
-        textarea.style.background = 'rgba(255,255,255,0.85)';
-        textarea.style.border = '2px dashed #7c3aed';
-        textarea.style.borderRadius = '4px';
-        textarea.style.padding = '2px 4px';
-        textarea.style.resize = 'none';
-        textarea.style.minWidth = '80px';
-        textarea.style.minHeight = `${obj.fontSize * 1.4}px`;
-        textarea.style.lineHeight = '1.2';
-        textarea.setAttribute('dir', 'auto');
-
-        // Position over canvas object
-        textarea.style.left = (obj.x * zoom + panX) + 'px';
-        textarea.style.top = (obj.y * zoom + panY) + 'px';
-
-        area.appendChild(textarea);
-        requestAnimationFrame(() => textarea.focus());
-
-        if ('ontouchstart' in window) {
-            setTimeout(() => textarea.scrollIntoView({ behavior: 'smooth', block: 'center' }), 150);
-        }
-
-        textarea.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commitText(); }
-            if (e.key === 'Escape') { e.preventDefault(); cancelText(); }
-        });
-
-        textarea.addEventListener('input', () => {
-            obj.text = textarea.value;
-            measureTextObject(obj);
-            renderOverlay();
-        });
-
-        textarea.addEventListener('blur', () => {
-            setTimeout(commitText, 100);
-        });
-
-        textarea.addEventListener('pointerdown', e => e.stopPropagation());
-
-        obj._textarea = textarea;
-    }
-
-    function commitText() {
-        if (!textEditing) return;
-        textEditing = false;
-        if (selectedTextObj && selectedTextObj._textarea) {
-            selectedTextObj.text = selectedTextObj._textarea.value;
-            if (!selectedTextObj.text.trim()) {
-                textObjects = textObjects.filter(o => o !== selectedTextObj);
-                selectedTextObj = null;
-            } else {
-                measureTextObject(selectedTextObj);
-            }
-            selectedTextObj && selectedTextObj._textarea && selectedTextObj._textarea.remove();
-            if (selectedTextObj) selectedTextObj._textarea = null;
-        }
-        renderOverlay();
-    }
-
-    function cancelText() {
-        if (!textEditing) return;
-        textEditing = false;
-        if (selectedTextObj) {
-            selectedTextObj._textarea && selectedTextObj._textarea.remove();
-            selectedTextObj._textarea = null;
-            if (selectedTextObj._savedText === '') {
-                textObjects = textObjects.filter(o => o !== selectedTextObj);
-                selectedTextObj = null;
-            } else {
-                selectedTextObj.text = selectedTextObj._savedText;
-                measureTextObject(selectedTextObj);
-            }
-        }
-        renderOverlay();
-    }
-
-    function flattenText() {
-        const layer = getActiveLayer();
-        if (!layer || textObjects.length === 0) return;
-        saveState();
-        for (const obj of textObjects) {
-            if (!obj.text) continue;
-            measureTextObject(obj);
-            layer.ctx.save();
-            layer.ctx.font = `${obj.italic ? 'italic ' : ''}${obj.bold ? 'bold ' : ''}${obj.fontSize}px 'Noto Sans Bengali', sans-serif`;
-            layer.ctx.fillStyle = obj.color || '#000000';
-            layer.ctx.textBaseline = 'top';
-            obj.text.split('\n').forEach((line, i) => {
-                layer.ctx.fillText(line, obj.x, obj.y + obj.fontSize * 1.2 * i + obj.fontSize);
-            });
-            layer.ctx.restore();
-        }
-        textObjects = [];
-        selectedTextObj = null;
-        renderAll();
         updateActiveThumbnail();
     }
 
@@ -1332,18 +1611,21 @@
             cropSel = null;
         }
         if (tool !== 'text') {
-            if (textEditing) commitText();
+            if (textModalOpen) commitTextModal();
             flattenText();
-            selectedTextObj = null;
-            textDragObj = null;
-            textDragPending = null;
-            textDragOff = null;
-            textResizeObj = null;
-            overlay.style.cursor = '';
+            selectedText = null;
+            textDragActive = false;
+            textRotating = false;
+            textResizing = false;
+            hideTextToolbar();
+            textCanvas.classList.remove('text-active');
+        } else {
+            textCanvas.classList.add('text-active');
         }
 
         showToolOptions(tool);
         renderOverlay();
+        renderTextObjects();
     }
 
     function showToolOptions(tool) {
@@ -1356,15 +1638,10 @@
     function setupOptions() {
         setupBrushPanel();
         setupColorPanel();
+        setupTextToolbar();
 
         // Eraser
         $('eraser-size').addEventListener('input', e => { eraserSize = +e.target.value; $('eraser-size-val').textContent = eraserSize; });
-
-        // Text
-        $('text-size').addEventListener('input', e => { textSize = +e.target.value; $('text-size-val').textContent = textSize; if (selectedTextObj) { selectedTextObj.fontSize = textSize; measureTextObject(selectedTextObj); renderOverlay(); } });
-        $('text-color').addEventListener('input', e => { textColor = e.target.value; if (selectedTextObj) { selectedTextObj.color = textColor; renderOverlay(); } });
-        $('text-bold-btn').addEventListener('click', () => { textBold = !textBold; $('text-bold-btn').classList.toggle('on', textBold); if (selectedTextObj) { selectedTextObj.bold = textBold; measureTextObject(selectedTextObj); renderOverlay(); } });
-        $('text-italic-btn').addEventListener('click', () => { textItalic = !textItalic; $('text-italic-btn').classList.toggle('on', textItalic); if (selectedTextObj) { selectedTextObj.italic = textItalic; measureTextObject(selectedTextObj); renderOverlay(); } });
 
         // Select actions
         $('sel-erase-btn').addEventListener('click', () => {
@@ -1407,13 +1684,11 @@
 
     // ========== LAYER PANEL ==========
     function setupLayerPanel() {
-        // Toggle
         layerBtn.addEventListener('click', e => {
             e.stopPropagation();
             layerPanel.classList.toggle('open');
         });
 
-        // Close on outside click
         document.addEventListener('click', e => {
             if (layerPanel.classList.contains('open') &&
                 !layerPanel.contains(e.target) &&
@@ -1422,25 +1697,20 @@
             }
         });
 
-        // Add layer
         lpAddBtn.addEventListener('click', () => addLayer());
 
-        // Duplicate layer
         lpDupBtn.addEventListener('click', () => {
             if (activeLayerId !== null) duplicateLayer(activeLayerId);
         });
 
-        // Delete layer
         lpDelBtn.addEventListener('click', () => {
             if (activeLayerId !== null) deleteLayer(activeLayerId);
         });
 
-        // Merge down
         lpMergeBtn.addEventListener('click', () => {
             if (activeLayerId !== null) mergeDown(activeLayerId);
         });
 
-        // Opacity slider
         lpOpacity.addEventListener('input', () => {
             const layer = getActiveLayer();
             if (!layer) return;
@@ -1449,7 +1719,6 @@
             renderAll();
         });
 
-        // Blend mode
         lpBlendMode.addEventListener('change', () => {
             const layer = getActiveLayer();
             if (!layer) return;
@@ -1462,7 +1731,6 @@
         if (!lpList) return;
         lpList.innerHTML = '';
 
-        // Display top-to-bottom (reverse of array order)
         for (let i = layers.length - 1; i >= 0; i--) {
             const layer = layers[i];
             const row = document.createElement('div');
@@ -1470,7 +1738,6 @@
             row.dataset.id = layer.id;
             row.dataset.idx = i;
 
-            // Thumbnail
             const thumbWrap = document.createElement('div');
             thumbWrap.className = 'lp-thumb';
             const thumbCanvas = document.createElement('canvas');
@@ -1481,13 +1748,11 @@
             thumbWrap.appendChild(thumbCanvas);
             row.appendChild(thumbWrap);
 
-            // Name
             const nameSpan = document.createElement('span');
             nameSpan.className = 'lp-name';
             nameSpan.textContent = layer.name;
             row.appendChild(nameSpan);
 
-            // Visibility button
             const visBtn = document.createElement('button');
             visBtn.className = 'lp-icon' + (layer.visible ? '' : ' hidden-state');
             visBtn.title = 'Toggle visibility';
@@ -1500,7 +1765,6 @@
             });
             row.appendChild(visBtn);
 
-            // Lock button
             const lockBtn = document.createElement('button');
             lockBtn.className = 'lp-icon' + (layer.locked ? ' active' : '');
             lockBtn.title = 'Toggle lock';
@@ -1514,12 +1778,10 @@
             });
             row.appendChild(lockBtn);
 
-            // Click to select layer
             row.addEventListener('click', () => {
                 if (layer.id !== activeLayerId) setActiveLayer(layer.id);
             });
 
-            // Double-click to rename
             nameSpan.addEventListener('dblclick', e => {
                 e.stopPropagation();
                 const input = document.createElement('input');
@@ -1540,7 +1802,6 @@
                 });
             });
 
-            // Drag to reorder
             row.draggable = true;
             row.addEventListener('dragstart', e => {
                 e.dataTransfer.setData('text/plain', i.toString());
@@ -1567,7 +1828,6 @@
             lpList.appendChild(row);
         }
 
-        // Update opacity/blend controls for active layer
         const active = getActiveLayer();
         if (active) {
             lpOpacity.value = active.opacity;
@@ -1608,7 +1868,23 @@
             else if (e.key === '+' || e.key === '=') setZoom(zoom * 1.15);
             else if (e.key === '-') setZoom(zoom / 1.15);
             else if (e.key === '0') fitToView();
-            else if (e.key === 'Escape') { sel = null; cropSel = null; showOptSelect(false); renderOverlay(); }
+            else if (e.key === 'Delete' || e.key === 'Backspace') {
+                if (currentTool === 'text' && selectedText) {
+                    textObjects = textObjects.filter(o => o !== selectedText);
+                    selectedText = null;
+                    hideTextToolbar();
+                    renderTextObjects();
+                }
+            }
+            else if (e.key === 'Escape') {
+                if (currentTool === 'text' && selectedText) {
+                    selectedText = null;
+                    hideTextToolbar();
+                    renderTextObjects();
+                } else {
+                    sel = null; cropSel = null; showOptSelect(false); renderOverlay();
+                }
+            }
         });
 
         area.addEventListener('wheel', e => {
@@ -1624,7 +1900,12 @@
 
     // ========== RESIZE ==========
     function setupResize() {
-        window.addEventListener('resize', () => { if (img) renderAll(); });
+        window.addEventListener('resize', () => {
+            if (img) {
+                resizeTextCanvas();
+                renderAll();
+            }
+        });
 
         undoBtn.addEventListener('click', undo);
         redoBtn.addEventListener('click', redo);
@@ -1923,10 +2204,15 @@
         brushColor = hex;
         colorBtnSwatch.style.background = hex;
         brushTriggerSwatch.style.background = hex;
-        textColor = hex;
-        $('text-color').value = hex;
         pickedColorPreview.style.background = hex;
         updateBrushPreview();
+
+        // Also update selected text color
+        if (selectedText) {
+            selectedText.color = hex;
+            $('tt-color').value = hex;
+            renderTextObjects();
+        }
 
         if (source === 'hue' || source === 'hex' || source === 'hsl' || source === 'init' || source === 'rgb' || source === 'eyedropper' || source === 'palette' || source === 'recent') {
             drawGradientField();
