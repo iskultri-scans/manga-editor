@@ -335,6 +335,7 @@ input[type="range"] {
 .canvas-area[data-tool="eyedropper"] #main-canvas { cursor: crosshair; }
 .canvas-area[data-tool="fill"] #main-canvas { cursor: crosshair; }
 .canvas-area[data-tool="crop"] #overlay-canvas { cursor: crosshair; }
+.canvas-area[data-tool="magic-wand"] #overlay-canvas { cursor: crosshair; }
 
 /* ===== BRUSH PANEL ===== */
 .brush-panel {

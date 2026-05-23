@@ -127,6 +127,16 @@
     let fillColor = '#ffffff';
     let fillTolerance = 30;
 
+    // Magic Wand
+    let selectionMask = null;       // Uint8Array: 1 = selected, 0 = not
+    let selectionMaskW = 0;         // width of mask canvas
+    let selectionMaskH = 0;         // height of mask canvas
+    let selectionBounds = null;     // { x, y, width, height } in image coords
+    let magicWandTolerance = 30;
+    let magicWandAddMode = false;   // false = new selection, true = add to selection
+    let marchingAntsOffset = 0;
+    let marchingAntsTimer = null;
+
     // Touch
     let touchCache = [];
     let lastPinchDist = 0;
@@ -323,6 +333,9 @@
 
                 sel = null;
                 cropSel = null;
+                selectionMask = null;
+                selectionBounds = null;
+                stopMarchingAnts();
 
                 baseWidth = img.width;
                 baseHeight = img.height;
@@ -444,6 +457,41 @@
                 octx.beginPath(); octx.moveTo(lx, cropSel.y); octx.lineTo(lx, cropSel.y + cropSel.h); octx.stroke();
                 const ly = cropSel.y + cropSel.h * i / 3;
                 octx.beginPath(); octx.moveTo(cropSel.x, ly); octx.lineTo(cropSel.x + cropSel.w, ly); octx.stroke();
+            }
+            octx.restore();
+        }
+
+        // Magic Wand selection — marching ants
+        if (selectionMask && (currentTool === 'magic-wand' || currentTool === 'text')) {
+            octx.save();
+            const boundary = getSelectionBoundary();
+            if (boundary.length > 0) {
+                // Draw boundary pixels as marching ants
+                octx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+                for (let i = 0; i < boundary.length; i += 2) {
+                    // Only draw every other "dash" based on position + offset
+                    const dashIdx = Math.floor((boundary[i] + boundary[i + 1] + marchingAntsOffset) / 2) % 4;
+                    if (dashIdx < 2) {
+                        octx.fillRect(boundary[i], boundary[i + 1], 1, 1);
+                    }
+                }
+                // Second pass: black dashes (the other half)
+                octx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+                for (let i = 0; i < boundary.length; i += 2) {
+                    const dashIdx = Math.floor((boundary[i] + boundary[i + 1] + marchingAntsOffset) / 2) % 4;
+                    if (dashIdx >= 2) {
+                        octx.fillRect(boundary[i], boundary[i + 1], 1, 1);
+                    }
+                }
+            }
+            // Bounding box outline
+            if (selectionBounds) {
+                octx.strokeStyle = '#4f9eff';
+                octx.lineWidth = 1 / zoom;
+                octx.setLineDash([4 / zoom, 3 / zoom]);
+                octx.lineDashOffset = -marchingAntsOffset / zoom;
+                octx.strokeRect(selectionBounds.x, selectionBounds.y, selectionBounds.width, selectionBounds.height);
+                octx.setLineDash([]);
             }
             octx.restore();
         }
@@ -1013,10 +1061,20 @@
         // Add Text button
         $('add-text-btn').addEventListener('click', () => {
             if (!img) return;
-            // Create new text at center of visible area
-            const cx = (area.clientWidth / 2 - panX) / zoom;
-            const cy = (area.clientHeight / 2 - panY) / zoom;
-            const obj = createTextObject(cx, cy);
+            let obj;
+            // If magic wand selection exists, use its bounds for the text object
+            if (selectionBounds && selectionBounds.width > 20 && selectionBounds.height > 10) {
+                obj = createTextObject(selectionBounds.x, selectionBounds.y);
+                obj.boxWidth = selectionBounds.width;
+                obj.boxHeight = selectionBounds.height;
+                // Clear the magic wand selection after using it
+                clearMagicWandSelection();
+            } else {
+                // Create new text at center of visible area
+                const cx = (area.clientWidth / 2 - panX) / zoom;
+                const cy = (area.clientHeight / 2 - panY) / zoom;
+                obj = createTextObject(cx, cy);
+            }
             textObjects.push(obj);
             selectedText = obj;
             openTextModal(obj);
@@ -1149,6 +1207,13 @@
                 touchStartPt = { cx: t.clientX, cy: t.clientY };
                 return;
             }
+            if (currentTool === 'magic-wand') {
+                // Don't process on touchstart — wait for touchend
+                const t = touchCache[0];
+                touchStartPt = { cx: t.clientX, cy: t.clientY };
+                touchPending = true;
+                return;
+            }
             touchPending = true;
             const t = touchCache[0];
             touchStartPt = { cx: t.clientX, cy: t.clientY };
@@ -1212,6 +1277,19 @@
                 textPointerUp();
                 return;
             }
+            if (currentTool === 'magic-wand' && touchPending && touchStartPt) {
+                // Magic wand: trigger on touchend with 5px threshold
+                touchPending = false;
+                const changedTouch = e.changedTouches[0];
+                if (changedTouch) {
+                    const dx = changedTouch.clientX - touchStartPt.cx;
+                    const dy = changedTouch.clientY - touchStartPt.cy;
+                    if (Math.hypot(dx, dy) < 5) {
+                        toolDown(screenToImg(touchStartPt.cx, touchStartPt.cy));
+                    }
+                }
+                return;
+            }
             if (touchPending) {
                 touchPending = false;
                 toolDown(screenToImg(touchStartPt.cx, touchStartPt.cy));
@@ -1234,6 +1312,7 @@
             case 'eyedropper': eyedropperDown(pt); break;
             case 'fill': fillDown(pt); break;
             case 'crop': cropDown(pt); break;
+            case 'magic-wand': magicWandDown(pt); break;
         }
     }
 
@@ -1389,6 +1468,137 @@
             stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
         }
         context.putImageData(imageData, 0, 0);
+    }
+
+    // ========== TOOL 8: MAGIC WAND ==========
+    function colorDiff(r1, g1, b1, r2, g2, b2) {
+        return Math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2);
+    }
+
+    function magicWandDown(pt) {
+        const layer = getActiveLayer();
+        if (!layer) return;
+
+        const x = Math.floor(clamp(pt.x, 0, layer.canvas.width - 1));
+        const y = Math.floor(clamp(pt.y, 0, layer.canvas.height - 1));
+        const w = layer.canvas.width;
+        const h = layer.canvas.height;
+        const imageData = layer.ctx.getImageData(0, 0, w, h);
+        const data = imageData.data;
+
+        // Seed color
+        const si = (y * w + x) * 4;
+        const seedR = data[si], seedG = data[si + 1], seedB = data[si + 2];
+
+        // BFS flood fill
+        const newMask = new Uint8Array(w * h);
+        const visited = new Uint8Array(w * h);
+        const stack = [[x, y]];
+
+        while (stack.length > 0) {
+            const [cx, cy] = stack.pop();
+            if (cx < 0 || cx >= w || cy < 0 || cy >= h) continue;
+            const idx = cy * w + cx;
+            if (visited[idx]) continue;
+            visited[idx] = 1;
+
+            const pi = idx * 4;
+            const diff = colorDiff(seedR, seedG, seedB, data[pi], data[pi + 1], data[pi + 2]);
+            if (diff > magicWandTolerance) continue;
+
+            newMask[idx] = 1;
+            stack.push([cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]);
+        }
+
+        // Apply mask
+        if (magicWandAddMode && selectionMask && selectionMaskW === w && selectionMaskH === h) {
+            // OR into existing mask
+            for (let i = 0; i < newMask.length; i++) {
+                selectionMask[i] = selectionMask[i] | newMask[i];
+            }
+        } else {
+            selectionMask = newMask;
+            selectionMaskW = w;
+            selectionMaskH = h;
+        }
+
+        computeSelectionBounds();
+        startMarchingAnts();
+        renderOverlay();
+    }
+
+    function computeSelectionBounds() {
+        if (!selectionMask) { selectionBounds = null; return; }
+        let minX = selectionMaskW, minY = selectionMaskH, maxX = 0, maxY = 0;
+        let found = false;
+        for (let y = 0; y < selectionMaskH; y++) {
+            for (let x = 0; x < selectionMaskW; x++) {
+                if (selectionMask[y * selectionMaskW + x]) {
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                    found = true;
+                }
+            }
+        }
+        if (!found) {
+            selectionBounds = null;
+            return;
+        }
+        selectionBounds = {
+            x: minX,
+            y: minY,
+            width: maxX - minX + 1,
+            height: maxY - minY + 1
+        };
+    }
+
+    function clearMagicWandSelection() {
+        selectionMask = null;
+        selectionBounds = null;
+        stopMarchingAnts();
+        renderOverlay();
+    }
+
+    // Marching ants animation
+    function startMarchingAnts() {
+        stopMarchingAnts();
+        marchingAntsOffset = 0;
+        marchingAntsTimer = setInterval(() => {
+            marchingAntsOffset = (marchingAntsOffset + 1) % 16;
+            renderOverlay();
+        }, 100);
+    }
+
+    function stopMarchingAnts() {
+        if (marchingAntsTimer) {
+            clearInterval(marchingAntsTimer);
+            marchingAntsTimer = null;
+        }
+    }
+
+    // Extract boundary pixels of the selection mask (pixels that border a non-selected pixel)
+    function getSelectionBoundary() {
+        if (!selectionMask) return [];
+        const w = selectionMaskW;
+        const h = selectionMaskH;
+        const boundary = [];
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                const idx = y * w + x;
+                if (!selectionMask[idx]) continue;
+                // Check if any 4-connected neighbor is NOT selected (or out of bounds)
+                const top = y > 0 ? selectionMask[(y - 1) * w + x] : 0;
+                const bot = y < h - 1 ? selectionMask[(y + 1) * w + x] : 0;
+                const lft = x > 0 ? selectionMask[y * w + (x - 1)] : 0;
+                const rgt = x < w - 1 ? selectionMask[y * w + (x + 1)] : 0;
+                if (!top || !bot || !lft || !rgt) {
+                    boundary.push(x, y);
+                }
+            }
+        }
+        return boundary;
     }
 
     // ========== TOOL 7: CROP ==========
@@ -1676,6 +1886,14 @@
         if (tool !== 'crop') {
             cropSel = null;
         }
+        if (tool !== 'magic-wand' && tool !== 'text') {
+            // Stop marching ants when leaving magic wand or text
+            stopMarchingAnts();
+            // Also clear magic wand selection when switching to non-magic/text tools
+        } else if (selectionMask) {
+            // (Re)start marching ants when entering magic wand or text with a selection
+            startMarchingAnts();
+        }
         if (tool !== 'text') {
             if (textModalOpen) commitTextModal();
             flattenText();
@@ -1746,6 +1964,20 @@
         $('rotate-cw-btn').addEventListener('click', () => rotateCanvas(90));
         $('flip-h-btn').addEventListener('click', () => flipCanvas(true));
         $('flip-v-btn').addEventListener('click', () => flipCanvas(false));
+
+        // Magic Wand
+        $('mw-tolerance').addEventListener('input', e => {
+            magicWandTolerance = +e.target.value;
+            $('mw-tolerance-val').textContent = magicWandTolerance;
+        });
+        $('mw-add-mode').addEventListener('click', () => {
+            magicWandAddMode = !magicWandAddMode;
+            $('mw-add-mode').classList.toggle('on', magicWandAddMode);
+            $('mw-add-mode').textContent = magicWandAddMode ? 'Add' : 'New';
+        });
+        $('mw-clear-btn').addEventListener('click', () => {
+            clearMagicWandSelection();
+        });
     }
 
     // ========== LAYER PANEL ==========

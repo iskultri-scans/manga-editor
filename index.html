@@ -82,6 +82,14 @@
                 <input type="range" id="fill-tolerance" min="0" max="100" value="30">
                 <span class="opt-val" id="fill-tolerance-val">30</span>
             </div>
+            <!-- Magic Wand options -->
+            <div class="opt-group" id="opt-magic-wand" data-tools="magic-wand">
+                <label class="opt-label">Tolerance</label>
+                <input type="range" id="mw-tolerance" min="0" max="100" value="30">
+                <span class="opt-val" id="mw-tolerance-val">30</span>
+                <button class="toggle-btn" id="mw-add-mode">New</button>
+                <button class="action-btn secondary" id="mw-clear-btn">Clear</button>
+            </div>
             <!-- Crop options -->
             <div class="opt-group" id="opt-crop" data-tools="crop">
                 <button class="action-btn" id="crop-apply-btn">Apply Crop</button>
@@ -304,6 +312,10 @@
             <button class="tool-btn" data-tool="fill">
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 22l1-1h3l9-9"/><path d="M3 21l9-9"/><path d="M19 11l-8 8"/><path d="M19 7c0 2.5-2 4.5-2 7"/><circle cx="19" cy="5" r="2"/></svg>
                 <span>Fill</span>
+            </button>
+            <button class="tool-btn" data-tool="magic-wand">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 4V2"/><path d="M15 16v-2"/><path d="M8 9h2"/><path d="M20 9h2"/><path d="M17.8 11.8L19 13"/><path d="M17.8 6.2L19 5"/><path d="M12.2 11.8L11 13"/><path d="M12.2 6.2L11 5"/><circle cx="15" cy="9" r="3"/><path d="M6 21l3-9 4 5 3-2 4 6"/></svg>
+                <span>Wand</span>
             </button>
             <button class="tool-btn" data-tool="crop">
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2v4H2"/><path d="M18 22v-4h4"/><rect x="6" y="6" width="12" height="12"/></svg>
