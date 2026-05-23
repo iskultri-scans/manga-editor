@@ -105,34 +105,22 @@
     let lastPt = null;
 
     // Text
-    let textSize = 28;
+    let textSize = 20;
     let textColor = '#000000';
     let textBold = false;
     let textItalic = false;
     let textEditing = false;
-    let textInputEl = null;
-
-    // Text objects (non-destructive, manipulable)
     let textObjects = [];
     let selectedTextObj = null;
     let textDragObj = null;
-    let textDragOff = null;
     let textDragPending = null;
-    let textDragThreshold = 3;
+    let textDragPendingOff = null;
+    let textDragPendingStart = null;
+    let textDragOff = null;
     let textResizeObj = null;
     let textResizeStart = null;
-    let textDblClickPending = false;
-    let textSavedRuns = null;
-    let textSavedFontSize = null;
-
-    // Text touch
-    let lastTextTapTime = 0;
-    let lastTextTapObj = null;
-    let textTouchDownDone = false;
-    let textTouchResize = false;
-    let textTouchResizeStartDist = 0;
-    let textTouchResizeStartFontSize = 0;
-    const TEXT_TOUCH_DRAG_THRESHOLD = 14;
+    let lastTapTime = 0;
+    let lastTapObj = null;
 
     // Fill
     let fillColor = '#ffffff';
@@ -458,39 +446,30 @@
         // Text objects
         if (currentTool === 'text' && !textEditing) {
             for (const obj of textObjects) {
-                measureTextObject(obj);
+                if (!obj.text) continue;
                 octx.save();
-                octx.font = getTextFont(obj);
-                octx.textAlign = 'left';
+                octx.font = `${obj.italic ? 'italic ' : ''}${obj.bold ? 'bold ' : ''}${obj.fontSize}px 'Noto Sans Bengali', sans-serif`;
+                octx.fillStyle = obj.color || '#000000';
                 octx.textBaseline = 'top';
-                const lh = obj.fontSize * 1.4;
-                const lines = getTextString(obj).split('\n');
-                let yOff = 0;
-                for (let i = 0; i < lines.length; i++) {
-                    const lineRuns = getLineRuns(obj.runs, i, lines);
-                    let xOff = 0;
-                    for (const lr of lineRuns) {
-                        octx.fillStyle = lr.color;
-                        octx.globalAlpha = 0.9;
-                        octx.fillText(lr.text, obj.x + xOff, obj.y + yOff);
-                        xOff += octx.measureText(lr.text).width;
-                    }
-                    yOff += lh;
-                }
+                const lines = obj.text.split('\n');
+                lines.forEach((line, i) => {
+                    octx.fillText(line, obj.x, obj.y + obj.fontSize * 1.2 * i + obj.fontSize);
+                });
                 octx.restore();
 
-                // Selection box and handles
                 if (obj === selectedTextObj) {
                     octx.save();
-                    octx.strokeStyle = '#7c6cf0';
+                    octx.strokeStyle = '#7c3aed';
                     octx.lineWidth = 1.5 / zoom;
-                    octx.setLineDash([4 / zoom, 3 / zoom]);
+                    octx.setLineDash([5 / zoom, 3 / zoom]);
                     octx.strokeRect(obj.x - 2, obj.y - 2, obj._w + 4, obj._h + 4);
                     octx.setLineDash([]);
-                    // Fix #11: Resize handle — larger on touch devices
-                    const hs = (isMobile ? 12 : 5) / zoom;
-                    octx.fillStyle = '#7c6cf0';
-                    octx.fillRect(obj.x + obj._w - hs, obj.y + obj._h - hs, hs * 2, hs * 2);
+
+                    // Resize handle
+                    const isMob = 'ontouchstart' in window;
+                    const hSize = (isMob ? 12 : 5) / zoom;
+                    octx.fillStyle = '#7c3aed';
+                    octx.fillRect(obj.x + obj._w - hSize, obj.y + obj._h - hSize, hSize * 2, hSize * 2);
                     octx.restore();
                 }
             }
@@ -514,11 +493,6 @@
     function setupPointer() {
         overlay.addEventListener('pointerdown', onPointerDown);
         overlay.addEventListener('dblclick', onDblClick);
-        overlay.addEventListener('pointermove', e => {
-            if (!img || currentTool !== 'text' || textEditing || e.pointerType === 'touch') return;
-            const pt = screenToImg(e.clientX, e.clientY);
-            textHover(pt);
-        });
         window.addEventListener('pointermove', onPointerMove);
         window.addEventListener('pointerup', onPointerUp);
     }
@@ -536,29 +510,21 @@
         if (!img || e.pointerType === 'touch' || !pointerDown) return;
         const pt = screenToImg(e.clientX, e.clientY);
         toolMove(pt);
-        if (currentTool === 'text') textHover(pt);
     }
 
     function onPointerUp(e) {
         if (e.pointerType === 'touch') return;
         pointerDown = false;
         toolUp();
-        if (currentTool === 'text' && !pointerDown) {
-            overlay.style.cursor = 'text';
-        }
     }
 
     function onDblClick(e) {
         if (!img || currentTool !== 'text' || textEditing) return;
-        // Fix #6: Set flag to prevent textDown from creating new object
-        textDblClickPending = true;
-        setTimeout(() => { textDblClickPending = false; }, 300);
         const pt = screenToImg(e.clientX, e.clientY);
         for (let i = textObjects.length - 1; i >= 0; i--) {
             if (hitTestText(textObjects[i], pt.x, pt.y)) {
                 selectedTextObj = textObjects[i];
                 startEditText(textObjects[i]);
-                renderOverlay();
                 return;
             }
         }
@@ -577,27 +543,19 @@
         e.preventDefault();
         touchCache = Array.from(e.touches);
         if (touchCache.length === 1) {
-            // Fix #10: Double-tap detection for text tool
             if (currentTool === 'text' && !textEditing) {
-                const now = Date.now();
                 const t = touchCache[0];
                 const pt = screenToImg(t.clientX, t.clientY);
+                // Double-tap detection
                 let tappedObj = null;
                 for (let i = textObjects.length - 1; i >= 0; i--) {
                     if (hitTestText(textObjects[i], pt.x, pt.y)) { tappedObj = textObjects[i]; break; }
                 }
-                if (tappedObj && tappedObj === lastTextTapObj && (now - lastTextTapTime) < 300) {
-                    lastTextTapTime = 0; lastTextTapObj = null;
-                    selectedTextObj = tappedObj;
-                    startEditText(tappedObj);
-                    renderOverlay();
-                    return;
+                if (tappedObj) {
+                    if (handleTextTouchStart(pt, tappedObj)) return;
                 }
-                lastTextTapTime = now;
-                lastTextTapObj = tappedObj;
-                // Fix #9: Use text-specific touch down handler
-                textTouchDown(pt);
-                textTouchDownDone = true;
+                // Normal touch down
+                textDown(pt);
                 touchStartPt = { cx: t.clientX, cy: t.clientY };
                 return;
             }
@@ -605,20 +563,6 @@
             const t = touchCache[0];
             touchStartPt = { cx: t.clientX, cy: t.clientY };
         } else if (touchCache.length === 2) {
-            // Fix #13: Two-finger pinch on text object for resize
-            if (currentTool === 'text' && selectedTextObj && !textEditing) {
-                const dist = pinchDist(touchCache);
-                textTouchResize = true;
-                textTouchResizeStartDist = dist;
-                textTouchResizeStartFontSize = selectedTextObj.fontSize;
-                touchPending = false;
-                drawing = false;
-                selActive = false;
-                isPinching = true;
-                lastPinchDist = dist;
-                lastPinchCenter = pinchCenter(touchCache);
-                return;
-            }
             touchPending = false;
             drawing = false;
             selActive = false;
@@ -634,11 +578,6 @@
         touchCache = Array.from(e.touches);
         if (touchCache.length === 1 && !isPinching) {
             const t = touchCache[0];
-            // Fix #9: Text tool uses its own drag threshold
-            if (textTouchDownDone && !touchPending) {
-                toolMove(screenToImg(t.clientX, t.clientY));
-                return;
-            }
             if (touchPending) {
                 const dx = t.clientX - touchStartPt.cx;
                 const dy = t.clientY - touchStartPt.cy;
@@ -648,29 +587,6 @@
             }
             toolMove(screenToImg(t.clientX, t.clientY));
         } else if (touchCache.length === 2 && isPinching) {
-            // Fix #13: Pinch-to-resize text
-            if (textTouchResize && selectedTextObj) {
-                const dist = pinchDist(touchCache);
-                const scale = dist / textTouchResizeStartDist;
-                selectedTextObj.fontSize = Math.max(6, Math.round(textTouchResizeStartFontSize * scale));
-                measureTextObject(selectedTextObj);
-                renderOverlay();
-                // Also handle zoom
-                const center = pinchCenter(touchCache);
-                const zoomScale = dist / lastPinchDist;
-                const newZoom = clamp(zoom * zoomScale, 0.05, 20);
-                const rect = area.getBoundingClientRect();
-                const cx = center.x - rect.left;
-                const cy = center.y - rect.top;
-                panX = cx - (cx - panX) * (newZoom / zoom) + (center.x - lastPinchCenter.x);
-                panY = cy - (cy - panY) * (newZoom / zoom) + (center.y - lastPinchCenter.y);
-                zoom = newZoom;
-                lastPinchDist = dist;
-                lastPinchCenter = center;
-                updateZoomDisplay();
-                zoomRender();
-                return;
-            }
             const dist = pinchDist(touchCache);
             const center = pinchCenter(touchCache);
             const scale = dist / lastPinchDist;
@@ -691,14 +607,8 @@
     function onTouchEnd(e) {
         e.preventDefault();
         touchCache = Array.from(e.touches);
-        if (touchCache.length < 2) { isPinching = false; textTouchResize = false; }
+        if (touchCache.length < 2) { isPinching = false; }
         if (touchCache.length === 0) {
-            if (textTouchDownDone) {
-                textTouchDownDone = false;
-                toolUp();
-                textTouchDownDone = false;
-                return;
-            }
             if (touchPending) {
                 touchPending = false;
                 toolDown(screenToImg(touchStartPt.cx, touchStartPt.cy));
@@ -828,128 +738,91 @@
     }
 
     // ========== TEXT OBJECTS ==========
-    function createTextObject(pt) {
+    function createTextObject(x, y) {
         return {
-            x: pt.x, y: pt.y,
+            x, y,
             fontSize: textSize,
             bold: textBold,
             italic: textItalic,
-            runs: [{ text: '', color: textColor }],
-            _w: 0, _h: 0
+            color: textColor,
+            text: '',
+            _w: 0,
+            _h: 0,
+            _savedText: ''
         };
     }
 
-    function getTextString(obj) {
-        return obj.runs.map(r => r.text).join('');
-    }
-
-    function setTextString(obj, str) {
-        obj.runs = [{ text: str, color: obj.runs.length ? obj.runs[0].color : textColor }];
-    }
-
-    function getTextFont(obj, scale) {
-        const s = scale || 1;
-        return `${obj.italic ? 'italic ' : ''}${obj.bold ? '700 ' : '400 '}${obj.fontSize * s}px 'Noto Sans Bengali', sans-serif`;
-    }
-
-    function measureTextObject(obj, scale) {
-        const s = scale || 1;
+    function measureTextObject(obj) {
         const tc = document.createElement('canvas').getContext('2d');
-        tc.font = getTextFont(obj, s);
-        const full = getTextString(obj);
-        if (!full) { obj._w = 0; obj._h = 0; return; }
-        const lines = full.split('\n');
-        let maxW = 0;
-        for (const line of lines) {
-            maxW = Math.max(maxW, tc.measureText(line).width);
-        }
-        obj._w = maxW;
-        obj._h = lines.length * obj.fontSize * s * 1.4;
+        tc.font = `${obj.italic ? 'italic ' : ''}${obj.bold ? 'bold ' : ''}${obj.fontSize}px 'Noto Sans Bengali', sans-serif`;
+        const lines = obj.text.split('\n');
+        obj._w = Math.max(...lines.map(l => tc.measureText(l).width), 40);
+        obj._h = lines.length * obj.fontSize * 1.2;
     }
 
-    function hitTestText(obj, imgX, imgY) {
-        measureTextObject(obj);
-        const pad = 4;
-        return imgX >= obj.x - pad && imgX <= obj.x + obj._w + pad &&
-               imgY >= obj.y - pad && imgY <= obj.y + obj._h + pad;
+    function hitTestText(obj, x, y) {
+        return x >= obj.x && x <= obj.x + obj._w &&
+               y >= obj.y && y <= obj.y + obj._h;
     }
 
-    function drawTextObjectToCtx(ctx, obj) {
-        const lines = getTextString(obj).split('\n');
-        ctx.font = getTextFont(obj);
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-        const lh = obj.fontSize * 1.4;
-        let yOff = 0;
-        for (let i = 0; i < lines.length; i++) {
-            const lineRuns = getLineRuns(obj.runs, i, lines);
-            let xOff = 0;
-            for (const lr of lineRuns) {
-                ctx.fillStyle = lr.color;
-                ctx.fillText(lr.text, obj.x + xOff, obj.y + yOff);
-                xOff += ctx.measureText(lr.text).width;
-            }
-            yOff += lh;
-        }
+    function hitTestResizeHandle(obj, x, y) {
+        const isMob = 'ontouchstart' in window;
+        const hSize = (isMob ? 24 : 10) / zoom;
+        const hx = obj.x + obj._w;
+        const hy = obj.y + obj._h;
+        return Math.abs(x - hx) < hSize && Math.abs(y - hy) < hSize;
     }
 
-    function getLineRuns(runs, lineIdx, lines) {
-        // Build character offset map to determine which runs apply to which line
-        let charOffset = 0;
-        let lineStart = 0;
-        for (let i = 0; i < lineIdx; i++) lineStart += lines[i].length + 1; // +1 for \n
-        const lineEnd = lineStart + lines[lineIdx].length;
-        const result = [];
-        let pos = 0;
-        for (const run of runs) {
-            const runEnd = pos + run.text.length;
-            if (runEnd > lineStart && pos < lineEnd) {
-                const s = Math.max(0, lineStart - pos);
-                const e = Math.min(run.text.length, lineEnd - pos);
-                result.push({ text: run.text.substring(s, e), color: run.color });
-            }
-            pos = runEnd;
-            if (pos > lineEnd) break;
+    function handleTextTouchStart(pt, obj) {
+        const now = Date.now();
+        if (lastTapObj === obj && now - lastTapTime < 300) {
+            startEditText(obj);
+            lastTapTime = 0;
+            lastTapObj = null;
+            return true;
         }
-        return result;
+        lastTapTime = now;
+        lastTapObj = obj;
+        return false;
     }
 
     // ========== TOOL 4: TEXT ==========
     function textDown(pt) {
         if (textEditing) { commitText(); return; }
 
-        // Fix #1: Check resize handle FIRST (before hit-testing objects)
-        if (selectedTextObj) {
-            const hSize = ('ontouchstart' in window ? 24 : 8) / zoom;
-            const hx = selectedTextObj.x + selectedTextObj._w;
-            const hy = selectedTextObj.y + selectedTextObj._h;
-            if (Math.abs(pt.x - hx) < hSize && Math.abs(pt.y - hy) < hSize) {
-                textResizeObj = selectedTextObj;
-                textResizeStart = { x: pt.x, y: pt.y, fontSize: selectedTextObj.fontSize, w: selectedTextObj._w, h: selectedTextObj._h };
-                return;
-            }
+        // 1. Resize handle check FIRST
+        if (selectedTextObj && hitTestResizeHandle(selectedTextObj, pt.x, pt.y)) {
+            textResizeObj = selectedTextObj;
+            textResizeStart = {
+                x: pt.x, y: pt.y,
+                fontSize: selectedTextObj.fontSize,
+                w: selectedTextObj._w,
+                h: selectedTextObj._h
+            };
+            return;
         }
 
-        // Check if clicking on existing text object
+        // 2. Hit test existing objects (top to bottom z-order)
         for (let i = textObjects.length - 1; i >= 0; i--) {
             if (hitTestText(textObjects[i], pt.x, pt.y)) {
                 selectedTextObj = textObjects[i];
-                // Fix #2: Store pending drag, don't start immediately
-                textDragPending = { obj: selectedTextObj, startPt: { x: pt.x, y: pt.y }, off: { x: pt.x - selectedTextObj.x, y: pt.y - selectedTextObj.y } };
+                textDragPending = selectedTextObj;
+                textDragPendingOff = { x: pt.x - selectedTextObj.x, y: pt.y - selectedTextObj.y };
+                textDragPendingStart = { x: pt.x, y: pt.y };
                 renderOverlay();
                 return;
             }
         }
 
-        // Fix #3: Click on empty space — first click deselects, second click creates
+        // 3. Click on empty space
         if (selectedTextObj) {
             selectedTextObj = null;
             renderOverlay();
             return;
         }
-        // Fix #6: Skip creation if this is the first click of a double-click
-        if (textDblClickPending) return;
-        const obj = createTextObject(pt);
+
+        // 4. Second click on empty = create new text object
+        const obj = createTextObject(pt.x, pt.y);
         textObjects.push(obj);
         selectedTextObj = obj;
         startEditText(obj);
@@ -957,55 +830,40 @@
     }
 
     function textMove(pt) {
-        // Fix #2: Promote pending drag after threshold
         if (textDragPending && !textDragObj) {
-            const dx = pt.x - textDragPending.startPt.x;
-            const dy = pt.y - textDragPending.startPt.y;
-            const threshold = 'ontouchstart' in window ? TEXT_TOUCH_DRAG_THRESHOLD : textDragThreshold;
-            if (Math.hypot(dx, dy) >= threshold) {
-                textDragObj = textDragPending.obj;
-                textDragOff = textDragPending.off;
-                textDragPending = null;
+            const dx = pt.x - textDragPendingStart.x;
+            const dy = pt.y - textDragPendingStart.y;
+            if (Math.hypot(dx, dy) > (('ontouchstart' in window) ? 15 : 3) / zoom) {
+                textDragObj = textDragPending;
+                textDragOff = textDragPendingOff;
             }
-            return;
         }
+
         if (textDragObj) {
             textDragObj.x = pt.x - textDragOff.x;
             textDragObj.y = pt.y - textDragOff.y;
+            overlay.style.cursor = 'move';
             renderOverlay();
-        } else if (textResizeObj) {
+            return;
+        }
+
+        if (textResizeObj) {
             const dx = pt.x - textResizeStart.x;
             const dy = pt.y - textResizeStart.y;
             const dist = Math.hypot(dx, dy);
             const startDist = Math.hypot(textResizeStart.w, textResizeStart.h);
             const scale = Math.max(0.2, (startDist + dist) / startDist);
             textResizeObj.fontSize = Math.max(6, Math.round(textResizeStart.fontSize * scale));
+            overlay.style.cursor = 'nwse-resize';
             measureTextObject(textResizeObj);
             renderOverlay();
+            return;
         }
-    }
 
-    function textUp() {
-        textDragPending = null;
-        textDragObj = null;
-        textDragOff = null;
-        textResizeObj = null;
-        textResizeStart = null;
-        overlay.style.cursor = 'text'; // Fix #4: Reset cursor
-        renderOverlay(); // Fix #4: Redraw overlay after drag/resize
-    }
-
-    // Fix #5: Cursor feedback based on hover state
-    function textHover(pt) {
-        if (textDragPending || textDragObj || textResizeObj) return;
-        if (selectedTextObj) {
-            const hSize = ('ontouchstart' in window ? 24 : 8) / zoom;
-            const hx = selectedTextObj.x + selectedTextObj._w;
-            const hy = selectedTextObj.y + selectedTextObj._h;
-            if (Math.abs(pt.x - hx) < hSize && Math.abs(pt.y - hy) < hSize) {
-                overlay.style.cursor = 'nwse-resize';
-                return;
-            }
+        // Hover cursor update
+        if (selectedTextObj && hitTestResizeHandle(selectedTextObj, pt.x, pt.y)) {
+            overlay.style.cursor = 'nwse-resize';
+            return;
         }
         for (let i = textObjects.length - 1; i >= 0; i--) {
             if (hitTestText(textObjects[i], pt.x, pt.y)) {
@@ -1016,236 +874,100 @@
         overlay.style.cursor = 'text';
     }
 
-    // Fix #9: Touch-specific text down with higher drag threshold
-    function textTouchDown(pt) {
-        if (textEditing) { commitText(); return; }
-
-        // Check resize handle first
-        if (selectedTextObj) {
-            const hSize = 24 / zoom; // Fix #11: Always 24px on touch
-            const hx = selectedTextObj.x + selectedTextObj._w;
-            const hy = selectedTextObj.y + selectedTextObj._h;
-            if (Math.abs(pt.x - hx) < hSize && Math.abs(pt.y - hy) < hSize) {
-                textResizeObj = selectedTextObj;
-                textResizeStart = { x: pt.x, y: pt.y, fontSize: selectedTextObj.fontSize, w: selectedTextObj._w, h: selectedTextObj._h };
-                return;
-            }
-        }
-
-        // Hit test existing objects
-        for (let i = textObjects.length - 1; i >= 0; i--) {
-            if (hitTestText(textObjects[i], pt.x, pt.y)) {
-                selectedTextObj = textObjects[i];
-                textDragPending = { obj: selectedTextObj, startPt: { x: pt.x, y: pt.y }, off: { x: pt.x - selectedTextObj.x, y: pt.y - selectedTextObj.y } };
-                renderOverlay();
-                return;
-            }
-        }
-
-        // Empty space: deselect or create
-        if (selectedTextObj) {
-            selectedTextObj = null;
-            renderOverlay();
-            return;
-        }
-        const obj = createTextObject(pt);
-        textObjects.push(obj);
-        selectedTextObj = obj;
-        startEditText(obj);
+    function textUp() {
+        textDragObj = null;
+        textDragOff = null;
+        textDragPending = null;
+        textDragPendingOff = null;
+        textDragPendingStart = null;
+        textResizeObj = null;
+        textResizeStart = null;
+        overlay.style.cursor = 'text';
         renderOverlay();
     }
 
-    // Fix #12: Detect mobile for textarea scroll behavior
-    const isMobile = 'ontouchstart' in window;
-
     function startEditText(obj) {
+        obj._savedText = obj.text;
         textEditing = true;
-        // Fix #7: Save original state for restore-on-Escape
-        textSavedRuns = obj.runs.map(r => ({ text: r.text, color: r.color }));
-        textSavedFontSize = obj.fontSize;
-        const input = document.createElement('textarea');
-        input.className = 'canvas-text-input';
-        input.value = getTextString(obj);
-        input.style.font = getTextFont(obj, zoom);
-        input.style.color = obj.runs[0].color;
-        input.style.lineHeight = '1.4';
-        input.style.left = (obj.x * zoom + panX) + 'px';
-        input.style.top = (obj.y * zoom + panY) + 'px';
-        input.setAttribute('dir', 'auto');
 
-        area.appendChild(input);
-        textInputEl = input;
-        requestAnimationFrame(() => input.focus());
+        const textarea = document.createElement('textarea');
+        textarea.className = 'canvas-text-input';
+        textarea.value = obj.text;
+        textarea.style.font = `${obj.italic ? 'italic ' : ''}${obj.bold ? 'bold ' : ''}${obj.fontSize}px 'Noto Sans Bengali', sans-serif`;
+        textarea.style.color = obj.color;
+        textarea.style.background = 'rgba(255,255,255,0.85)';
+        textarea.style.border = '2px dashed #7c3aed';
+        textarea.style.borderRadius = '4px';
+        textarea.style.padding = '2px 4px';
+        textarea.style.resize = 'none';
+        textarea.style.minWidth = '80px';
+        textarea.style.minHeight = `${obj.fontSize * 1.4}px`;
+        textarea.style.lineHeight = '1.2';
+        textarea.setAttribute('dir', 'auto');
 
-        // Fix #12: On mobile, scroll textarea into view after keyboard opens
-        if (isMobile) {
-            setTimeout(() => { input.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 100);
+        // Position over canvas object
+        textarea.style.left = (obj.x * zoom + panX) + 'px';
+        textarea.style.top = (obj.y * zoom + panY) + 'px';
+
+        area.appendChild(textarea);
+        requestAnimationFrame(() => textarea.focus());
+
+        if ('ontouchstart' in window) {
+            setTimeout(() => textarea.scrollIntoView({ behavior: 'smooth', block: 'center' }), 150);
         }
 
-        // Color button for selected text
-        const colorBtn = document.createElement('button');
-        colorBtn.className = 'text-color-btn';
-        colorBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/></svg>';
-        colorBtn.style.background = obj.runs[0].color;
-        colorBtn.style.display = 'none';
-        area.appendChild(colorBtn);
-        textInputEl._colorBtn = colorBtn;
-
-        const colorInput = document.createElement('input');
-        colorInput.type = 'color';
-        colorInput.value = obj.runs[0].color;
-        colorInput.style.position = 'absolute';
-        colorInput.style.opacity = '0';
-        colorInput.style.width = '0';
-        colorInput.style.height = '0';
-        area.appendChild(colorInput);
-        textInputEl._colorInput = colorInput;
-
-        colorBtn.addEventListener('pointerdown', e => {
-            e.preventDefault();
-            e.stopPropagation();
-            colorInput.value = obj.runs[0].color;
-            colorInput.click();
-        });
-
-        colorInput.addEventListener('input', () => {
-            const selStart = input.selectionStart;
-            const selEnd = input.selectionEnd;
-            if (selStart !== selEnd) {
-                applyColorToSelection(obj, input.value, selStart, selEnd, colorInput.value);
-                input.style.color = colorInput.value;
-            }
-            obj.runs[0].color = colorInput.value;
-            colorBtn.style.background = colorInput.value;
-            textColor = colorInput.value;
-        });
-
-        input.addEventListener('pointerdown', e => e.stopPropagation());
-
-        input.addEventListener('blur', () => { if (textEditing) commitText(); });
-
-        input.addEventListener('keydown', e => {
+        textarea.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commitText(); }
             if (e.key === 'Escape') { e.preventDefault(); cancelText(); }
         });
 
-        // Show color button when text is selected
-        input.addEventListener('selectionupdate', positionColorBtn);
-        input.addEventListener('select', positionColorBtn);
-        input.addEventListener('click', positionColorBtn);
-        input.addEventListener('keyup', positionColorBtn);
+        textarea.addEventListener('input', () => {
+            obj.text = textarea.value;
+            measureTextObject(obj);
+            renderOverlay();
+        });
 
-        function positionColorBtn() {
-            const s = input.selectionStart, e = input.selectionEnd;
-            if (s !== e) {
-                const rect = input.getBoundingClientRect();
-                const areaRect = area.getBoundingClientRect();
-                const caretRect = getCaretCoordinates(input, s);
-                colorBtn.style.display = 'flex';
-                colorBtn.style.left = (caretRect.left - areaRect.left + 20) + 'px';
-                colorBtn.style.top = (caretRect.top - areaRect.top - 8) + 'px';
-            } else {
-                colorBtn.style.display = 'none';
-            }
-        }
+        textarea.addEventListener('blur', () => {
+            setTimeout(commitText, 100);
+        });
 
-        function getCaretCoordinates(el, pos) {
-            const div = document.createElement('div');
-            const style = getComputedStyle(el);
-            div.style.cssText = `position:absolute;visibility:hidden;white-space:pre-wrap;word-wrap:break-word;`;
-            div.style.font = style.font;
-            div.style.lineHeight = style.lineHeight;
-            div.style.padding = style.padding;
-            div.style.width = style.width;
-            div.textContent = el.value.substring(0, pos);
-            const span = document.createElement('span');
-            span.textContent = el.value.substring(pos) || '.';
-            div.appendChild(span);
-            document.body.appendChild(div);
-            const coords = { left: span.offsetLeft, top: span.offsetTop };
-            document.body.removeChild(div);
-            return coords;
-        }
+        textarea.addEventListener('pointerdown', e => e.stopPropagation());
 
-        function applyColorToSelection(obj, fullText, start, end, color) {
-            // Rebuild runs with color applied to selected range
-            let pos = 0;
-            const newRuns = [];
-            for (const run of obj.runs) {
-                const runEnd = pos + run.text.length;
-                if (runEnd <= start || pos >= end) {
-                    newRuns.push(run);
-                } else {
-                    if (pos < start) {
-                        newRuns.push({ text: run.text.substring(0, start - pos), color: run.color });
-                    }
-                    const s = Math.max(0, start - pos);
-                    const en = Math.min(run.text.length, end - pos);
-                    newRuns.push({ text: run.text.substring(s, en), color: color });
-                    if (runEnd > end) {
-                        newRuns.push({ text: run.text.substring(end - pos), color: run.color });
-                    }
-                }
-                pos = runEnd;
-            }
-            obj.runs = newRuns;
-        }
+        obj._textarea = textarea;
     }
 
     function commitText() {
-        if (!textInputEl) return;
-        const layer = getActiveLayer();
-        if (!layer) { cleanupTextInput(); return; }
-        const text = textInputEl.value;
-        const obj = selectedTextObj;
-        if (obj) {
-            const prevText = getTextString(obj);
-            if (text !== prevText) {
-                if (obj.runs.length === 1) {
-                    obj.runs[0].text = text;
-                } else {
-                    setTextString(obj, text);
-                }
-            }
-            if (text.trim()) {
-                // Text is stored as object, will be flattened later
-            } else {
-                // Remove empty text object
-                textObjects = textObjects.filter(o => o !== obj);
+        if (!textEditing) return;
+        textEditing = false;
+        if (selectedTextObj && selectedTextObj._textarea) {
+            selectedTextObj.text = selectedTextObj._textarea.value;
+            if (!selectedTextObj.text.trim()) {
+                textObjects = textObjects.filter(o => o !== selectedTextObj);
                 selectedTextObj = null;
+            } else {
+                measureTextObject(selectedTextObj);
             }
+            selectedTextObj && selectedTextObj._textarea && selectedTextObj._textarea.remove();
+            if (selectedTextObj) selectedTextObj._textarea = null;
         }
-        textSavedRuns = null;
-        textSavedFontSize = null;
-        cleanupTextInput();
-        renderAll();
+        renderOverlay();
     }
 
     function cancelText() {
-        // Fix #7: Restore original content on Escape (don't delete existing objects)
+        if (!textEditing) return;
+        textEditing = false;
         if (selectedTextObj) {
-            if (textSavedRuns) {
-                selectedTextObj.runs = textSavedRuns;
-                selectedTextObj.fontSize = textSavedFontSize || selectedTextObj.fontSize;
-                measureTextObject(selectedTextObj);
-            } else if (!getTextString(selectedTextObj).trim()) {
+            selectedTextObj._textarea && selectedTextObj._textarea.remove();
+            selectedTextObj._textarea = null;
+            if (selectedTextObj._savedText === '') {
                 textObjects = textObjects.filter(o => o !== selectedTextObj);
                 selectedTextObj = null;
+            } else {
+                selectedTextObj.text = selectedTextObj._savedText;
+                measureTextObject(selectedTextObj);
             }
         }
-        textSavedRuns = null;
-        textSavedFontSize = null;
-        cleanupTextInput();
-    }
-
-    function cleanupTextInput() {
-        if (textInputEl) {
-            if (textInputEl._colorBtn) textInputEl._colorBtn.remove();
-            if (textInputEl._colorInput) textInputEl._colorInput.remove();
-            textInputEl.remove();
-            textInputEl = null;
-        }
-        textEditing = false;
+        renderOverlay();
     }
 
     function flattenText() {
@@ -1253,46 +975,21 @@
         if (!layer || textObjects.length === 0) return;
         saveState();
         for (const obj of textObjects) {
-            const fullText = getTextString(obj);
-            if (!fullText.trim()) continue;
+            if (!obj.text) continue;
+            measureTextObject(obj);
             layer.ctx.save();
-            layer.ctx.font = getTextFont(obj);
-            layer.ctx.textAlign = 'left';
+            layer.ctx.font = `${obj.italic ? 'italic ' : ''}${obj.bold ? 'bold ' : ''}${obj.fontSize}px 'Noto Sans Bengali', sans-serif`;
+            layer.ctx.fillStyle = obj.color || '#000000';
             layer.ctx.textBaseline = 'top';
-            const lh = obj.fontSize * 1.4;
-            const lines = fullText.split('\n');
-            let yOff = 0;
-            for (let i = 0; i < lines.length; i++) {
-                const lineRuns = getLineRuns(obj.runs, i, lines);
-                let xOff = 0;
-                for (const lr of lineRuns) {
-                    layer.ctx.fillStyle = lr.color;
-                    layer.ctx.fillText(lr.text, obj.x + xOff, obj.y + yOff);
-                    xOff += layer.ctx.measureText(lr.text).width;
-                }
-                yOff += lh;
-            }
+            obj.text.split('\n').forEach((line, i) => {
+                layer.ctx.fillText(line, obj.x, obj.y + obj.fontSize * 1.2 * i + obj.fontSize);
+            });
             layer.ctx.restore();
         }
         textObjects = [];
         selectedTextObj = null;
+        renderAll();
         updateActiveThumbnail();
-    }
-
-    function wrapText(ctx, text, maxW) {
-        const lines = [];
-        let line = '';
-        for (const ch of text) {
-            const test = line + ch;
-            if (ctx.measureText(test).width > maxW && line) {
-                lines.push(line);
-                line = ch;
-            } else {
-                line = test;
-            }
-        }
-        if (line) lines.push(line);
-        return lines;
     }
 
     // ========== TOOL 5: EYEDROPPER ==========
@@ -1640,9 +1337,8 @@
             selectedTextObj = null;
             textDragObj = null;
             textDragPending = null;
+            textDragOff = null;
             textResizeObj = null;
-            textTouchDownDone = false;
-            textTouchResize = false;
             overlay.style.cursor = '';
         }
 
@@ -1666,7 +1362,7 @@
 
         // Text
         $('text-size').addEventListener('input', e => { textSize = +e.target.value; $('text-size-val').textContent = textSize; if (selectedTextObj) { selectedTextObj.fontSize = textSize; measureTextObject(selectedTextObj); renderOverlay(); } });
-        $('text-color').addEventListener('input', e => { textColor = e.target.value; });
+        $('text-color').addEventListener('input', e => { textColor = e.target.value; if (selectedTextObj) { selectedTextObj.color = textColor; renderOverlay(); } });
         $('text-bold-btn').addEventListener('click', () => { textBold = !textBold; $('text-bold-btn').classList.toggle('on', textBold); if (selectedTextObj) { selectedTextObj.bold = textBold; measureTextObject(selectedTextObj); renderOverlay(); } });
         $('text-italic-btn').addEventListener('click', () => { textItalic = !textItalic; $('text-italic-btn').classList.toggle('on', textItalic); if (selectedTextObj) { selectedTextObj.italic = textItalic; measureTextObject(selectedTextObj); renderOverlay(); } });
 
