@@ -117,7 +117,7 @@
     let textRotating = false;
     let textRotateStart = null;
     let textResizing = false;
-    let textResizeCorner = null;
+    let textResizeEdge = null;
     let textResizeStart = null;
     let textModalOpen = false;
     let lastTapTime = 0;
@@ -491,6 +491,7 @@
             italic: false,
             lineHeight: 1.4,
             boxWidth: 200,           // in image pixels — controls word wrap
+            boxHeight: 0,            // in image pixels — bounding box height (set by computeLines)
             rotation: 0,             // degrees
             _lines: [],              // computed wrapped lines
             _h: 0                    // computed height in image pixels
@@ -516,45 +517,64 @@
         // Also split on \n
         obj._lines = lines.flatMap(l => l.split('\n'));
         obj._h = obj._lines.length * obj.fontSize * obj.lineHeight;
+        if (!obj.boxHeight) obj.boxHeight = obj._h;
+    }
+
+    // Transform screen point (relative to area) into text object's local coordinate system
+    // (zoomed, rotated). Used for rotation-aware hit testing.
+    function screenToTextLocal(obj, sx, sy) {
+        const screen = imageToScreen(obj.x, obj.y);
+        const dx = sx - screen.x;
+        const dy = sy - screen.y;
+        const rad = -(obj.rotation * Math.PI) / 180; // reverse rotation
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+        return {
+            x: dx * cos - dy * sin,
+            y: dx * sin + dy * cos
+        };
     }
 
     function hitTestTextScreen(obj, pt) {
-        const screen = imageToScreen(obj.x, obj.y);
+        if (!obj || !obj.text) return false;
+        const local = screenToTextLocal(obj, pt.x, pt.y);
         const w = obj.boxWidth * zoom;
-        const h = obj._h * zoom;
-        // Approximate — ignore rotation for hit test
-        return pt.x >= screen.x && pt.x <= screen.x + w &&
-               pt.y >= screen.y && pt.y <= screen.y + h;
+        const h = obj.boxHeight * zoom;
+        return local.x >= 0 && local.x <= w && local.y >= 0 && local.y <= h;
     }
 
-    function hitTestCornerHandle(obj, pt) {
-        if (!obj || obj._lines.length === 0) return -1;
-        const screen = imageToScreen(obj.x, obj.y);
+    // Hit test edge handles — returns 'top'|'bottom'|'left'|'right' or null
+    function hitTestEdgeHandle(obj, pt) {
+        if (!obj || !obj.text) return null;
+        const local = screenToTextLocal(obj, pt.x, pt.y);
         const w = obj.boxWidth * zoom;
-        const h = obj._h * zoom;
-        const r = 14; // hit radius (mobile-friendly)
-        const corners = [
-            { x: screen.x, y: screen.y },
-            { x: screen.x + w, y: screen.y },
-            { x: screen.x, y: screen.y + h },
-            { x: screen.x + w, y: screen.y + h }
+        const h = obj.boxHeight * zoom;
+        const r = 14; // hit radius (mobile-friendly, ~28px hit area)
+
+        const handles = [
+            { edge: 'top',    x: w / 2, y: 0 },
+            { edge: 'bottom', x: w / 2, y: h },
+            { edge: 'left',   x: 0,     y: h / 2 },
+            { edge: 'right',  x: w,     y: h / 2 }
         ];
-        for (let i = 0; i < corners.length; i++) {
-            if (Math.hypot(pt.x - corners[i].x, pt.y - corners[i].y) < r) {
-                return i;
+
+        for (const handle of handles) {
+            if (Math.abs(local.x - handle.x) < r && Math.abs(local.y - handle.y) < r) {
+                return handle.edge;
             }
         }
-        return -1;
+        return null;
     }
 
     function hitTestRotationHandle(obj, pt) {
-        if (!obj || obj._lines.length === 0) return false;
-        const screen = imageToScreen(obj.x, obj.y);
+        if (!obj || !obj.text) return false;
+        const local = screenToTextLocal(obj, pt.x, pt.y);
         const w = obj.boxWidth * zoom;
-        const h = obj._h * zoom;
-        const handleX = screen.x + w / 2;
-        const handleY = screen.y + h + 32;
-        return Math.hypot(pt.x - handleX, pt.y - handleY) < 18;
+        const h = obj.boxHeight * zoom;
+        // Rotation handle circle is at (w/2, h+37) in local coords
+        const handleX = w / 2;
+        const handleY = h + 37;
+        return Math.abs(local.x - handleX) < 14 && Math.abs(local.y - handleY) < 14;
     }
 
     // ========== TEXT POINTER EVENTS (screen coordinates) ==========
@@ -568,7 +588,7 @@
                 textRotating = true;
                 const screen = imageToScreen(selectedText.x, selectedText.y);
                 const cx = screen.x + (selectedText.boxWidth * zoom) / 2;
-                const cy = screen.y + (selectedText._h * zoom) / 2;
+                const cy = screen.y + (selectedText.boxHeight * zoom) / 2;
                 textRotateStart = {
                     startAngle: Math.atan2(pt.y - cy, pt.x - cx),
                     startRotation: selectedText.rotation
@@ -577,16 +597,18 @@
                 return;
             }
 
-            // Corner handles
-            const corner = hitTestCornerHandle(selectedText, pt);
-            if (corner >= 0) {
+            // Edge handles
+            const edge = hitTestEdgeHandle(selectedText, pt);
+            if (edge) {
                 textResizing = true;
-                textResizeCorner = corner;
+                textResizeEdge = edge;
                 textResizeStart = {
                     px: pt.x,
                     py: pt.y,
                     boxWidth: selectedText.boxWidth,
-                    fontSize: selectedText.fontSize
+                    boxHeight: selectedText.boxHeight,
+                    ox: selectedText.x,
+                    oy: selectedText.y
                 };
                 hideTextToolbar();
                 return;
@@ -640,7 +662,7 @@
         if (textRotating && selectedText) {
             const screen = imageToScreen(selectedText.x, selectedText.y);
             const cx = screen.x + (selectedText.boxWidth * zoom) / 2;
-            const cy = screen.y + (selectedText._h * zoom) / 2;
+            const cy = screen.y + (selectedText.boxHeight * zoom) / 2;
             const angle = Math.atan2(pt.y - cy, pt.x - cx);
             selectedText.rotation = textRotateStart.startRotation +
                 (angle - textRotateStart.startAngle) * (180 / Math.PI);
@@ -650,10 +672,40 @@
         }
 
         if (textResizing && selectedText) {
-            const dx = (pt.x - textResizeStart.px) / zoom;
-            selectedText.boxWidth = Math.max(60, textResizeStart.boxWidth + dx);
-            computeLines(selectedText);
-            textCanvas.style.cursor = 'ew-resize';
+            // Project screen delta onto the object's local axes (accounting for rotation)
+            const sdx = pt.x - textResizeStart.px;
+            const sdy = pt.y - textResizeStart.py;
+            const rad = (selectedText.rotation * Math.PI) / 180;
+            const cos = Math.cos(rad);
+            const sin = Math.sin(rad);
+            // localDx: component along local x-axis (image pixels)
+            // localDy: component along local y-axis (image pixels)
+            const localDx = (sdx * cos + sdy * sin) / zoom;
+            const localDy = (-sdx * sin + sdy * cos) / zoom;
+            const minBox = 30;
+
+            switch (textResizeEdge) {
+                case 'right':
+                    selectedText.boxWidth = Math.max(minBox, textResizeStart.boxWidth + localDx);
+                    computeLines(selectedText);
+                    textCanvas.style.cursor = 'ew-resize';
+                    break;
+                case 'left':
+                    selectedText.x = textResizeStart.ox + localDx;
+                    selectedText.boxWidth = Math.max(minBox, textResizeStart.boxWidth - localDx);
+                    computeLines(selectedText);
+                    textCanvas.style.cursor = 'ew-resize';
+                    break;
+                case 'bottom':
+                    selectedText.boxHeight = Math.max(minBox, textResizeStart.boxHeight + localDy);
+                    textCanvas.style.cursor = 'ns-resize';
+                    break;
+                case 'top':
+                    selectedText.y = textResizeStart.oy + localDy;
+                    selectedText.boxHeight = Math.max(minBox, textResizeStart.boxHeight - localDy);
+                    textCanvas.style.cursor = 'ns-resize';
+                    break;
+            }
             renderTextObjects();
             return;
         }
@@ -664,8 +716,9 @@
                 textCanvas.style.cursor = 'grab';
                 return;
             }
-            if (hitTestCornerHandle(selectedText, pt) >= 0) {
-                textCanvas.style.cursor = 'ew-resize';
+            const edge = hitTestEdgeHandle(selectedText, pt);
+            if (edge) {
+                textCanvas.style.cursor = (edge === 'top' || edge === 'bottom') ? 'ns-resize' : 'ew-resize';
                 return;
             }
         }
@@ -745,6 +798,7 @@
                 if (selectedText === obj) selectedText = null;
             } else {
                 computeLines(obj);
+                obj.boxHeight = obj._h; // auto-fit box to text
             }
             closeModal();
             showTextToolbar();
@@ -760,6 +814,7 @@
             } else {
                 obj.text = savedText;
                 computeLines(obj);
+                obj.boxHeight = obj._h; // auto-fit box to text
             }
             closeModal();
             if (selectedText) showTextToolbar();
@@ -822,36 +877,42 @@
             // Draw selection box and handles only when selected and not dragging
             if (obj === selectedText && !textDragActive && !textRotating && !textResizing) {
                 const w = obj.boxWidth * zoom;
-                const h = obj._h * zoom;
-                const r = 6; // handle radius
+                const h = obj.boxHeight * zoom;
 
+                // Dashed selection border
                 tctx.strokeStyle = '#4f9eff';
                 tctx.lineWidth = 1.5;
                 tctx.setLineDash([5, 3]);
                 tctx.strokeRect(0, 0, w, h);
                 tctx.setLineDash([]);
 
-                // Corner handles
-                const corners = [[0,0],[w,0],[0,h],[w,h]];
-                for (const [cx, cy] of corners) {
-                    tctx.beginPath();
-                    tctx.arc(cx, cy, r, 0, Math.PI * 2);
-                    tctx.fillStyle = '#ffffff';
-                    tctx.fill();
-                    tctx.strokeStyle = '#4f9eff';
-                    tctx.lineWidth = 2;
-                    tctx.stroke();
-                }
+                // Edge handles — small filled rectangles
+                // Top handle: wide and short (horizontal bar)
+                tctx.fillStyle = '#4f9eff';
+                tctx.strokeStyle = '#ffffff';
+                tctx.lineWidth = 1.5;
+                // Top center
+                tctx.fillRect(w / 2 - 12, -5, 24, 10);
+                tctx.strokeRect(w / 2 - 12, -5, 24, 10);
+                // Bottom center
+                tctx.fillRect(w / 2 - 12, h - 5, 24, 10);
+                tctx.strokeRect(w / 2 - 12, h - 5, 24, 10);
+                // Left center
+                tctx.fillRect(-5, h / 2 - 12, 10, 24);
+                tctx.strokeRect(-5, h / 2 - 12, 10, 24);
+                // Right center
+                tctx.fillRect(w - 5, h / 2 - 12, 10, 24);
+                tctx.strokeRect(w - 5, h / 2 - 12, 10, 24);
 
-                // Rotation handle — below bottom center
+                // Rotation handle — line extending below bottom-center handle
                 tctx.beginPath();
-                tctx.moveTo(w / 2, h);
-                tctx.lineTo(w / 2, h + 24);
+                tctx.moveTo(w / 2, h + 5);
+                tctx.lineTo(w / 2, h + 29);
                 tctx.strokeStyle = '#4f9eff';
                 tctx.lineWidth = 1.5;
                 tctx.stroke();
                 tctx.beginPath();
-                tctx.arc(w / 2, h + 32, 8, 0, Math.PI * 2);
+                tctx.arc(w / 2, h + 37, 8, 0, Math.PI * 2);
                 tctx.fillStyle = '#4f9eff';
                 tctx.fill();
             }
@@ -890,6 +951,7 @@
             if (!selectedText) return;
             selectedText.fontSize = Math.max(6, selectedText.fontSize - 2);
             computeLines(selectedText);
+            selectedText.boxHeight = selectedText._h;
             updateTextToolbarValues();
             renderTextObjects();
         });
@@ -897,6 +959,7 @@
             if (!selectedText) return;
             selectedText.fontSize = Math.min(200, selectedText.fontSize + 2);
             computeLines(selectedText);
+            selectedText.boxHeight = selectedText._h;
             updateTextToolbarValues();
             renderTextObjects();
         });
@@ -913,6 +976,7 @@
             if (!selectedText) return;
             selectedText.bold = !selectedText.bold;
             computeLines(selectedText);
+            selectedText.boxHeight = selectedText._h;
             updateTextToolbarValues();
             renderTextObjects();
         });
@@ -922,6 +986,7 @@
             if (!selectedText) return;
             selectedText.italic = !selectedText.italic;
             computeLines(selectedText);
+            selectedText.boxHeight = selectedText._h;
             updateTextToolbarValues();
             renderTextObjects();
         });
@@ -941,6 +1006,7 @@
             if (!selectedText) return;
             selectedText.lineHeight = +e.target.value / 10;
             computeLines(selectedText);
+            selectedText.boxHeight = selectedText._h;
             renderTextObjects();
         });
 
