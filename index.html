@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <!--
+    viewport: user-scalable=no prevents the browser from hijacking pinch
+    gestures on the canvas. width=device-width + initial-scale=1 + maximum-scale=1
+    + viewport-fit=cover give us a stable portrait layout on phones with notches.
+  -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#1a1a1a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>Manga Panel Editor</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!--
+    Top app bar: keeps primary actions visible without crowding the canvas.
+    Sticky at top, max 56px tall to leave room for canvas on small screens.
+  -->
+  <header id="app-bar">
+    <button id="btn-open" class="icon-btn" title="Open image" aria-label="Open image">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+        <path fill="currentColor" d="M19 13v6H5v-6H3v8h18v-8zM6 9l1.4 1.4L11 6.8V17h2V6.8l3.6 3.6L18 9l-6-6z"/>
+      </svg>
+    </button>
+    <button id="btn-undo" class="icon-btn" disabled title="Undo" aria-label="Undo">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+        <path fill="currentColor" d="M12.5 8c-2.65 0-5.05 1.04-6.83 2.73L3 8v9h9l-2.83-2.83C10.44 12.96 12.39 12 14.5 12c4.08 0 7.5 3.92 8.5 5-1.41-4.61-5.55-9-10.5-9z"/>
+      </svg>
+    </button>
+    <button id="btn-redo" class="icon-btn" disabled title="Redo" aria-label="Redo">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+        <path fill="currentColor" d="M11.5 8c4.95 0 9.09 4.39 10.5 9-1-1.08-4.42-5-8.5-5-2.11 0-4.06.96-5.67 2.17L9 17H0V8l2.67 2.73C4.45 9.04 6.85 8 9.5 8h2z" transform="matrix(-1 0 0 1 22 0)"/>
+      </svg>
+    </button>
+    <div class="app-title">Manga Editor</div>
+    <button id="btn-toggle-original" class="icon-btn" title="Compare with original" aria-label="Toggle original view">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+        <path fill="currentColor" d="M12 4.5C7 4.5 2.7 7.6 1 12c1.7 4.4 6 7.5 11 7.5s9.3-3.1 11-7.5c-1.7-4.4-6-7.5-11-7.5zM12 17c-2.8 0-5-2.2-5-5s2.2-5 5-5 5 2.2 5 5-2.2 5-5 5zm0-8c-1.7 0-3 1.3-3 3s1.3 3 3 3 3-1.3 3-3-1.3-3-3-3z"/>
+      </svg>
+    </button>
+    <button id="btn-export" class="icon-btn accent" title="Export PNG" aria-label="Export PNG">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+        <path fill="currentColor" d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+      </svg>
+    </button>
+  </header>
+
+  <!--
+    Canvas stage: holds the display canvas. touch-action:none on this element
+    disables browser pinch-zoom-page and pull-to-refresh so our JS handlers own
+    the gestures.
+  -->
+  <main id="stage">
+    <canvas id="display-canvas" aria-label="Editing canvas"></canvas>
+    <!-- Overlay canvas: rendered above display canvas for tool previews
+         (lasso outline, text box selection handles, marching-ants selection).
+         pointer-events:none so it doesn't intercept gestures meant for display canvas. -->
+    <canvas id="overlay-canvas" aria-hidden="true"></canvas>
+
+    <!-- Empty-state placeholder shown before any image is loaded -->
+    <div id="empty-state" class="empty-state">
+      <svg viewBox="0 0 24 24" width="64" height="64" aria-hidden="true">
+        <path fill="currentColor" d="M19 13v6H5v-6H3v8h18v-8zM6 9l1.4 1.4L11 6.8V17h2V6.8l3.6 3.6L18 9l-6-6z"/>
+      </svg>
+      <p class="empty-title">Open a manga page</p>
+      <p class="empty-sub">Tap the upload button, or drag a PNG/JPG here.</p>
+      <button id="btn-open-hero" class="primary-btn">Choose photo</button>
+    </div>
+
+    <!-- Small floating status pill (zoom %, busy indicator, etc.) -->
+    <div id="status-pill" class="status-pill hidden">100%</div>
+
+    <!-- Hidden file input — opened by JS when "Open" is tapped -->
+    <input type="file" id="file-input" accept="image/png,image/jpeg,image/webp" hidden>
+  </main>
+
+  <!--
+    Bottom toolbar: tool selection. Fixed at bottom of viewport so it stays
+    reachable in portrait. Each button is 44x44 minimum tap target.
+  -->
+  <nav id="tool-bar" aria-label="Editing tools">
+    <button class="tool-btn" data-tool="wand" title="Magic Wand">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M7.5 5.6L10 9l-3.4 2.5L7 7 3.5 5 7 3zm10 4.4L15 6.6 17.5 3 21 5.5 18.5 9zM12 22l-2-2 4-4 2 2zm-7-7l2-2 2 2-2 2zm12-1l1 1-1 1-1-1zM2 14l1 1-1 1zm20 0l1 1-1 1z"/></svg>
+      <span>Wand</span>
+    </button>
+    <button class="tool-btn" data-tool="lasso" title="Lasso">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M12 2C7 2 3 4.5 3 8c0 2 1.5 3.8 4 5 .3 1.6 1.6 3 3.4 3.5L9 18.5c-.5.5-.5 1.3 0 1.8s1.3.5 1.8 0L13 18c.5-.5.5-1.3 0-1.8l-.4-.4c2.9-.7 5-2.7 5-5.8 0-3.5-4-8-9-8z"/></svg>
+      <span>Lasso</span>
+    </button>
+    <button class="tool-btn" data-tool="brush" title="Brush">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M7 14c-1.7 0-3 1.3-3 3 0 1.3-1.2 2-2 2 .9 1.2 2.4 2 4 2 2.2 0 4-1.8 4-4 0-1.7-1.3-3-3-3zm13-12L9 13l-2-2L18 0z"/></svg>
+      <span>Brush</span>
+    </button>
+    <button class="tool-btn" data-tool="eraser" title="Eraser">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M16.2 3.3l4.5 4.5c.8.8.8 2 0 2.8L12 19.3 4.7 12l8.7-8.7c.8-.8 2-.8 2.8 0zM3 15l6 6h7v-2H10.8L3 11.2z"/></svg>
+      <span>Erase</span>
+    </button>
+    <button class="tool-btn" data-tool="fill" title="Fill">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M19 11.5s-2 2.2-2 3.5c0 1.1.9 2 2 2s2-.9 2-2c0-1.3-2-3.5-2-3.5zM5 21l-2-2 9-9 2 2zm15-12L11 0 8.5 2.5l9 9z"/></svg>
+      <span>Fill</span>
+    </button>
+    <button class="tool-btn" data-tool="eyedropper" title="Eyedropper">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M17.5 3.5l3 3-2 2-1-1-9 9-3.5 1 1-3.5 9-9-1-1z"/></svg>
+      <span>Pick</span>
+    </button>
+    <button class="tool-btn" data-tool="text" title="Text">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M5 4v3h5.5v12h3V7H19V4z"/></svg>
+      <span>Text</span>
+    </button>
+    <button class="tool-btn" data-tool="pan" title="Pan">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M13 6v5h5V7.75L22.25 12 18 16.25V13h-5v5h3.25L12 22.25 7.75 18H11v-5H6v3.25L1.75 12 6 7.75V11h5V6H7.75L12 1.75 16.25 6z"/></svg>
+      <span>Pan</span>
+    </button>
+  </nav>
+
+  <!--
+    Tool options sheet: slides up from bottom (above the tool bar) when a tool
+    is selected. Contains sliders/toggles relevant to the active tool.
+    Hidden by default. Tapping the tool bar toggles it open.
+  -->
+  <section id="options-sheet" class="options-sheet hidden" aria-label="Tool options">
+    <div class="sheet-grip" id="sheet-grip" role="button" aria-label="Collapse options"></div>
+    <div class="sheet-content" id="sheet-content">
+      <!-- Dynamically populated by main.js based on active tool -->
+    </div>
+  </section>
+
+  <!--
+    Text editor modal: shown when user creates or double-taps a text box.
+    Full-screen overlay so the on-screen keyboard doesn't fight with our UI.
+  -->
+  <div id="text-modal" class="modal hidden" role="dialog" aria-modal="true" aria-label="Edit text">
+    <div class="modal-card">
+      <div class="modal-header">
+        <button id="text-modal-cancel" class="text-btn">Cancel</button>
+        <span class="modal-title">Edit text</span>
+        <button id="text-modal-apply" class="text-btn accent">Apply</button>
+      </div>
+      <textarea id="text-modal-input" rows="4" placeholder="Enter text…"></textarea>
+      <div class="text-modal-controls">
+        <label>Size <input type="number" id="text-modal-size" min="8" max="400" step="1"></label>
+        <label>Color <input type="color" id="text-modal-color" value="#000000"></label>
+        <label>Align
+          <select id="text-modal-align">
+            <option value="left">Left</option>
+            <option value="center" selected>Center</option>
+            <option value="right">Right</option>
+          </select>
+        </label>
+        <label>Stroke <input type="color" id="text-modal-stroke" value="#ffffff"></label>
+        <label>Stroke w <input type="number" id="text-modal-stroke-w" min="0" max="20" step="0.5" value="0"></label>
+        <label><input type="checkbox" id="text-modal-bold"> Bold</label>
+        <label><input type="checkbox" id="text-modal-italic"> Italic</label>
+        <label><input type="checkbox" id="text-modal-autofit" checked> Auto-fit</label>
+      </div>
+    </div>
+  </div>
+
+  <!-- Tiny toast for non-blocking feedback -->
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- Script load order matters: utils first, then engine, then tools, then main -->
+  <script src="js/utils.js"></script>
+  <script src="js/history.js"></script>
+  <script src="js/layers.js"></script>
+  <script src="js/canvas-engine.js"></script>
+  <script src="js/tools/selection.js"></script>
+  <script src="js/tools/magic-wand.js"></script>
+  <script src="js/tools/fill.js"></script>
+  <script src="js/tools/brush.js"></script>
+  <script src="js/tools/eraser.js"></script>
+  <script src="js/tools/lasso.js"></script>
+  <script src="js/tools/text-tool.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
