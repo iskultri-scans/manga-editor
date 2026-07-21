@@ -494,35 +494,44 @@ input, select, textarea { font: inherit; color: inherit; }
 }
 .text-modal-controls {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px 12px;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px 10px;
   margin-top: 14px;
+  max-height: 50vh;
+  overflow-y: auto;
 }
 .text-modal-controls label {
-  display: flex; align-items: center; gap: 6px;
-  font-size: 12px;
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 11px;
   color: var(--text-2);
-  min-height: 36px;
+  min-height: 48px;
 }
 .text-modal-controls input[type="number"],
 .text-modal-controls input[type="color"],
-.text-modal-controls select {
+.text-modal-controls select,
+.text-modal-controls input[type="range"] {
   flex: 1; min-width: 0;
-  height: 34px;
+  height: 32px;
   background: var(--bg-1);
   border: 1px solid var(--border);
   border-radius: var(--radius-1);
-  padding: 0 8px;
+  padding: 0 6px;
   color: var(--text-1);
-  font-size: 13px;
+  font-size: 12px;
 }
 .text-modal-controls input[type="color"] {
-  width: 38px; padding: 3px;
+  width: 34px; padding: 2px;
+  height: 32px;
 }
 .text-modal-controls input[type="checkbox"] {
-  width: 20px; height: 20px;
+  width: 18px; height: 18px;
   accent-color: var(--accent);
   cursor: pointer;
+  margin: 4px 0;
+}
+.text-modal-controls input[type="range"] {
+  padding: 0;
+  height: 20px;
 }
 
 /* ---------- Toast ---------- */

@@ -742,11 +742,21 @@
     const sizeEl = document.getElementById('text-modal-size');
     const colorEl = document.getElementById('text-modal-color');
     const alignEl = document.getElementById('text-modal-align');
+    const valignEl = document.getElementById('text-modal-valign');
     const strokeEl = document.getElementById('text-modal-stroke');
     const strokeWEl = document.getElementById('text-modal-stroke-w');
     const boldEl = document.getElementById('text-modal-bold');
     const italicEl = document.getElementById('text-modal-italic');
     const autofitEl = document.getElementById('text-modal-autofit');
+    const fontFamilyEl = document.getElementById('text-modal-font-family');
+    const fontWeightEl = document.getElementById('text-modal-font-weight');
+    const letterSpacingEl = document.getElementById('text-modal-letter-spacing');
+    const lineHeightEl = document.getElementById('text-modal-line-height');
+    const rotationEl = document.getElementById('text-modal-rotation');
+    const opacityEl = document.getElementById('text-modal-opacity');
+    const bgColorEl = document.getElementById('text-modal-bg-color');
+    const bgOpacityEl = document.getElementById('text-modal-bg-opacity');
+    const shadowEl = document.getElementById('text-modal-shadow');
 
     // Snapshot for undo.
     const before = {
@@ -755,22 +765,42 @@
       baseFontSize: textBox.baseFontSize,
       color: textBox.color,
       align: textBox.align,
+      valign: textBox.valign,
       strokeColor: textBox.strokeColor,
       strokeWidth: textBox.strokeWidth,
       bold: textBox.bold,
       italic: textBox.italic,
-      autoFit: textBox.autoFit
+      autoFit: textBox.autoFit,
+      fontFamily: textBox.fontFamily,
+      fontWeight: textBox.fontWeight || '400',
+      letterSpacing: textBox.letterSpacing || 0,
+      lineHeight: textBox.lineHeight || 1.2,
+      rotation: textBox.rotation || 0,
+      opacity: textBox.opacity !== undefined ? textBox.opacity : 1,
+      bgColor: textBox.bgColor || '#ffffff',
+      bgOpacity: textBox.bgOpacity || 0,
+      shadow: !!textBox.shadow
     };
 
     input.value = textBox.text || '';
     sizeEl.value = textBox.fontSize;
     colorEl.value = textBox.color;
     alignEl.value = textBox.align;
+    valignEl.value = textBox.valign || 'middle';
     strokeEl.value = textBox.strokeColor;
     strokeWEl.value = textBox.strokeWidth;
     boldEl.checked = textBox.bold;
     italicEl.checked = textBox.italic;
     autofitEl.checked = textBox.autoFit;
+    fontFamilyEl.value = textBox.fontFamily.split(',')[0] || 'Noto Sans Bengali';
+    fontWeightEl.value = textBox.fontWeight || '400';
+    letterSpacingEl.value = textBox.letterSpacing || 0;
+    lineHeightEl.value = textBox.lineHeight || 1.2;
+    rotationEl.value = textBox.rotation || 0;
+    opacityEl.value = textBox.opacity !== undefined ? textBox.opacity : 1;
+    bgColorEl.value = textBox.bgColor || '#ffffff';
+    bgOpacityEl.value = textBox.bgOpacity || 0;
+    shadowEl.checked = !!textBox.shadow;
 
     modal.classList.remove('hidden');
     setTimeout(() => input.focus(), 50);
@@ -785,11 +815,21 @@
         baseFontSize: +sizeEl.value,
         color: colorEl.value,
         align: alignEl.value,
+        valign: valignEl.value,
         strokeColor: strokeEl.value,
         strokeWidth: +strokeWEl.value,
         bold: boldEl.checked,
         italic: italicEl.checked,
-        autoFit: autofitEl.checked
+        autoFit: autofitEl.checked,
+        fontFamily: fontFamilyEl.value,
+        fontWeight: fontWeightEl.value,
+        letterSpacing: +letterSpacingEl.value,
+        lineHeight: +lineHeightEl.value,
+        rotation: +rotationEl.value,
+        opacity: +opacityEl.value,
+        bgColor: bgColorEl.value,
+        bgOpacity: +bgOpacityEl.value,
+        shadow: shadowEl.checked
       };
       Object.assign(textBox, after);
       textBox._lines = null; // force relayout
