@@ -41,6 +41,12 @@
       this.bold = !!opts.bold;
       this.italic = !!opts.italic;
       this.letterSpacing = opts.letterSpacing || 0;
+      this.lineHeight = opts.lineHeight || 1.2;
+      this.rotation = opts.rotation || 0;           // in degrees
+      this.opacity = opts.opacity !== undefined ? opts.opacity : 1;
+      this.bgColor = opts.bgColor || '#ffffff';
+      this.bgOpacity = opts.bgOpacity || 0;
+      this.shadow = !!opts.shadow;
       this.autoFit = opts.autoFit !== false;
       this.visible = true;
       // Computed at layout time.
@@ -52,7 +58,7 @@
     /** Build CSS font shorthand. */
     _fontShorthand(size) {
       const style = this.italic ? 'italic ' : '';
-      const weight = this.bold ? '700 ' : '400 ';
+      const weight = this.bold ? '700 ' : (this.fontWeight || '400');
       return `${style}${weight}${size}px ${this.fontFamily}`;
     }
 
@@ -105,7 +111,7 @@
         this._effectiveSize = this.fontSize;
         this._lines = this._wrap(ctx, this.text, this.w, this.fontSize);
         // Compute total height to detect overflow.
-        const lineH = this.fontSize * 1.2;
+        const lineH = this.fontSize * this.lineHeight;
         const totalH = this._lines.length * lineH;
         this._overflow = totalH > this.h;
         return;
@@ -116,7 +122,7 @@
       // 2) If baseFontSize doesn't fit, shrink via binary search (min 8px).
       const fits = (size) => {
         const lines = this._wrap(ctx, this.text, this.w, size);
-        const lineH = size * 1.2;
+        const lineH = size * this.lineHeight;
         const totalH = lines.length * lineH;
         return totalH <= this.h && lines.every(l => ctx.measureText(l).width <= this.w);
       };
@@ -155,7 +161,7 @@
 
       this._lines = this._wrap(ctx, this.text, this.w, this._effectiveSize);
       // Recompute overflow (should be false if auto-fit succeeded).
-      const lineH = this._effectiveSize * 1.2;
+      const lineH = this._effectiveSize * this.lineHeight;
       this._overflow = (this._lines.length * lineH) > this.h;
     }
 
@@ -171,7 +177,7 @@
       ctx.textBaseline = 'middle';
       ctx.textAlign = 'left'; // we measure manually for precise alignment
 
-      const lineH = size * 1.2;
+      const lineH = size * this.lineHeight;
       const totalH = this._lines.length * lineH;
 
       // Vertical placement.
@@ -179,6 +185,37 @@
       if (this.valign === 'top') startY = this.y + lineH / 2;
       else if (this.valign === 'bottom') startY = this.y + this.h - totalH + lineH / 2;
       else startY = this.y + (this.h - totalH) / 2 + lineH / 2;
+
+      // Save context for rotation/opacity.
+      ctx.save();
+      
+      // Apply opacity.
+      ctx.globalAlpha = this.opacity;
+
+      // Apply rotation around center of box.
+      if (this.rotation !== 0) {
+        const cx = this.x + this.w / 2;
+        const cy = this.y + this.h / 2;
+        ctx.translate(cx, cy);
+        ctx.rotate(this.rotation * Math.PI / 180);
+        ctx.translate(-cx, -cy);
+      }
+
+      // Draw background if opacity > 0.
+      if (this.bgOpacity > 0) {
+        ctx.fillStyle = this.bgColor;
+        ctx.globalAlpha = this.bgOpacity;
+        ctx.fillRect(this.x, this.y, this.w, this.h);
+        ctx.globalAlpha = this.opacity;
+      }
+
+      // Draw shadow if enabled.
+      if (this.shadow) {
+        ctx.shadowColor = 'rgba(0,0,0,0.5)';
+        ctx.shadowBlur = 4;
+        ctx.shadowOffsetX = 2;
+        ctx.shadowOffsetY = 2;
+      }
 
       for (let i = 0; i < this._lines.length; i++) {
         const line = this._lines[i];
@@ -199,6 +236,13 @@
         ctx.fillStyle = this.color;
         ctx.fillText(line, x, y);
       }
+
+      // Reset shadow and restore context.
+      ctx.shadowColor = 'transparent';
+      ctx.shadowBlur = 0;
+      ctx.shadowOffsetX = 0;
+      ctx.shadowOffsetY = 0;
+      ctx.restore();
 
       if ('letterSpacing' in ctx) ctx.letterSpacing = '0px';
     }
